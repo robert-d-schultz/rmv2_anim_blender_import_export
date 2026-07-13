@@ -3,12 +3,14 @@ schema_version = "1.0.0"
 id = "io_scene_rmv2"
 version = "1.1.0"
 name = "Total War RigidModel (.rigid_model_v2, .anim)"
-tagline = "Import-Export Total War RigidModel v2 meshes and .anim animations"
+tagline = "Import-Export Total War RigidModel v2 meshes and .anim animation"
 maintainer = "rob <chaosrobie@gmail.com>"
 type = "add-on"
+website = "https://github.com/robert-d-schultz/rmv2_anim_blender_import_export"
+copyright = ["2026 Robert Schultz"]
 tags = ["Import-Export"]
 blender_version_min = "4.2.0"
-license = ["SPDX:MIT"]
+license = ["SPDX:GPL-3.0-or-later"]
 
 [permissions]
-files = "Read/write .rigid_model_v2 / .anim game files and texture folders"
+files = "Read/write .rigid_model_v2 / .anim game files and texture folder"
