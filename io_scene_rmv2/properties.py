@@ -1,0 +1,249 @@
+"""Property groups holding RMV2 metadata on Blender IDs.
+
+Everything needed to round-trip a mesh lives either here (common, user
+editable settings) or in the `extra_json` blob (rare/advanced fields that we
+preserve verbatim: transform matrices, padding bytes, shader parameter
+lists...).
+"""
+
+from __future__ import annotations
+
+import bpy
+from bpy.props import (
+    BoolProperty,
+    CollectionProperty,
+    EnumProperty,
+    FloatProperty,
+    IntProperty,
+    StringProperty,
+)
+
+from . import rmv2_format as rf
+
+# ---------------------------------------------------------------------------
+# Enum item tables
+# ---------------------------------------------------------------------------
+
+VERTEX_FORMAT_ITEMS = [
+    ("AUTO", "Auto", "Static if the mesh has no bone weights, otherwise "
+     "Cinematic (4 influences)"),
+    ("STATIC", "Static", "No bone weights (buildings, props). 2 UV channels"),
+    ("WEIGHTED", "Weighted", "2 bone influences per vertex"),
+    ("CINEMATIC", "Cinematic", "4 bone influences per vertex"),
+]
+
+VERTEX_FORMAT_TO_INT = {
+    "STATIC": rf.VF_STATIC,
+    "WEIGHTED": rf.VF_WEIGHTED,
+    "CINEMATIC": rf.VF_CINEMATIC,
+}
+VERTEX_FORMAT_FROM_INT = {v: k for k, v in VERTEX_FORMAT_TO_INT.items()}
+
+
+def _material_id_items():
+    items = [("AUTO", "Auto",
+              "default_type for static meshes, weighted for skinned ones",
+              0)]
+    for mat_id in sorted(rf.MATERIAL_NAMES):
+        name = rf.MATERIAL_NAMES[mat_id]
+        items.append((name, f"{name} ({mat_id})",
+                      f"ModelMaterialEnum value {mat_id}", mat_id + 1))
+    items.append(("OTHER", "Other (raw id)",
+                  "Unknown material id, uses the 'Raw Material Id' value",
+                  20000))
+    return items
+
+
+MATERIAL_ID_ITEMS = _material_id_items()
+
+
+def _texture_type_items():
+    items = []
+    for ttype in sorted(rf.TEXTURE_TYPE_NAMES):
+        name = rf.TEXTURE_TYPE_NAMES[ttype]
+        items.append((name, f"{name} ({ttype})",
+                      f"TextureType value {ttype}", ttype))
+    items.append(("OTHER", "Other (raw id)",
+                  "Unknown texture type, uses the 'Raw Type' value", 10000))
+    return items
+
+
+TEXTURE_TYPE_ITEMS = _texture_type_items()
+
+ALPHA_MODE_ITEMS = [
+    ("NONE", "Not Set", "Do not write an alpha parameter"),
+    ("OPAQUE", "Opaque", "Alpha int param = 0"),
+    ("TRANSPARENT", "Alpha Blend/Test", "Alpha int param = 1"),
+]
+
+VERSION_ITEMS = [
+    ("6", "RMV2 v6", "Rome 2 / Attila era"),
+    ("7", "RMV2 v7", "Warhammer 1 & 2 era"),
+    ("8", "RMV2 v8", "Warhammer 3 / Troy era (vertex colours)"),
+]
+
+
+# ---------------------------------------------------------------------------
+# Property groups
+# ---------------------------------------------------------------------------
+
+class RMV2TextureSlot(bpy.types.PropertyGroup):
+    texture_type: EnumProperty(
+        name="Type", items=TEXTURE_TYPE_ITEMS, default="BaseColour",
+        description="Texture slot type (TextureType enum in the file)")
+    raw_type: IntProperty(
+        name="Raw Type", default=0, min=0,
+        description="Numeric texture type, used when Type is 'Other'")
+    path: StringProperty(
+        name="Path", default="",
+        description="Pack-file relative path, e.g. "
+        "variantmeshes\\wh_variantmodels\\...\\body_base_colour.dds")
+
+    def type_as_int(self) -> int:
+        if self.texture_type == "OTHER":
+            return self.raw_type
+        return _texture_name_to_int(self.texture_type)
+
+    def set_type_from_int(self, value: int):
+        if value in rf.TEXTURE_TYPE_NAMES:
+            self.texture_type = rf.TEXTURE_TYPE_NAMES[value]
+        else:
+            self.texture_type = "OTHER"
+            self.raw_type = value
+
+
+def _texture_name_to_int(name: str) -> int:
+    for ttype, tname in rf.TEXTURE_TYPE_NAMES.items():
+        if tname == name:
+            return ttype
+    return 0
+
+
+class RMV2ObjectSettings(bpy.types.PropertyGroup):
+    model_name: StringProperty(
+        name="Model Name", default="", maxlen=31,
+        description="Mesh name stored in the file (max 31 chars). "
+        "Empty = use the object name")
+    vertex_format: EnumProperty(
+        name="Vertex Format", items=VERTEX_FORMAT_ITEMS, default="AUTO")
+    material_id: EnumProperty(
+        name="Material", items=MATERIAL_ID_ITEMS, default="AUTO",
+        description="ModelMaterialEnum written to the mesh header")
+    material_id_raw: IntProperty(
+        name="Raw Material Id", default=68, min=0, max=65535,
+        description="Numeric material id, used when Material is 'Other'")
+    alpha_mode: EnumProperty(
+        name="Alpha Mode", items=ALPHA_MODE_ITEMS, default="OPAQUE")
+    render_flag: IntProperty(
+        name="Render Flag", default=0, min=0, max=65535)
+    shader_name: StringProperty(
+        name="Shader", default=rf.DEFAULT_SHADER_NAME, maxlen=12)
+    texture_directory: StringProperty(
+        name="Texture Directory", default="",
+        description="Pack-file relative texture directory")
+    filters: StringProperty(
+        name="Filters", default="",
+        description="Filter string from the material header (usually empty)")
+    matrix_index: IntProperty(
+        name="Matrix Index", default=-1, soft_min=-1, soft_max=255,
+        description="Bone/matrix the mesh is attached to (destructible "
+        "buildings etc.), -1 = none")
+    parent_matrix_index: IntProperty(
+        name="Parent Matrix Index", default=-1, soft_min=-1, soft_max=255)
+    textures: CollectionProperty(type=RMV2TextureSlot)
+    active_texture_index: IntProperty(default=0)
+    extra_json: StringProperty(
+        name="Extra Data (JSON)", default="",
+        description="Preserved raw fields: transform matrices, padding, "
+        "shader bytes and string/float/int/vec4 parameter lists")
+
+
+class RMV2AttachPoint(bpy.types.PropertyGroup):
+    """One attachment point (name + bone index + 3x4 rest matrix), stored
+    on the root collection and re-written on export."""
+    name: StringProperty(
+        name="Name", default="",
+        description="Attachment point name, usually a bone name")
+    bone_index: IntProperty(
+        name="Bone Index", default=0, min=0, max=65535,
+        description="Skeleton bone index this attachment point follows")
+    matrix: bpy.props.FloatVectorProperty(
+        name="Matrix", size=12,
+        default=rf.IDENTITY_3X4,
+        description="3x4 row-major rest matrix from the file (game space)")
+
+
+class RMV2CollectionSettings(bpy.types.PropertyGroup):
+    is_rmv2_root: BoolProperty(
+        name="RMV2 Root", default=False,
+        description="This collection represents one .rigid_model_v2 file")
+    version: EnumProperty(
+        name="Version", items=VERSION_ITEMS, default="7")
+    skeleton_name: StringProperty(
+        name="Skeleton", default="",
+        description="Skeleton name written to the file header, e.g. "
+        "humanoid01. Leave empty for static models")
+    attach_points: CollectionProperty(type=RMV2AttachPoint)
+    active_attach_index: IntProperty(default=0)
+    is_lod: BoolProperty(
+        name="RMV2 LOD", default=False,
+        description="This collection is one LOD of an RMV2 model")
+    lod_level: IntProperty(name="LOD Level", default=0, min=0)
+    camera_distance: FloatProperty(
+        name="Camera Distance", default=40.0,
+        description="Distance until which this LOD is displayed")
+    quality_level: IntProperty(
+        name="Quality Level", default=0, min=0, max=255,
+        description="Lowest graphics quality level at which this LOD is "
+        "active (0 = visible on all settings)")
+
+
+class RMV2AddonPreferences(bpy.types.AddonPreferences):
+    bl_idname = __package__
+
+    texture_root: StringProperty(
+        name="Texture Root Directory", subtype="DIR_PATH", default="",
+        description="Folder containing extracted game textures. Texture "
+        "paths from RMV2 files are resolved relative to this directory "
+        "when building Blender materials")
+
+    def draw(self, context):
+        layout = self.layout
+        layout.prop(self, "texture_root")
+        layout.label(
+            text="Extract textures from the game packs (e.g. with RPFM or "
+            "AssetEditor) into this folder to see them on import.",
+            icon="INFO")
+
+
+def get_texture_root(context) -> str:
+    try:
+        prefs = context.preferences.addons[__package__].preferences
+        return prefs.texture_root or ""
+    except (KeyError, AttributeError):
+        return ""
+
+
+CLASSES = (
+    RMV2TextureSlot,
+    RMV2ObjectSettings,
+    RMV2AttachPoint,
+    RMV2CollectionSettings,
+    RMV2AddonPreferences,
+)
+
+
+def register():
+    for cls in CLASSES:
+        bpy.utils.register_class(cls)
+    bpy.types.Object.rmv2 = bpy.props.PointerProperty(
+        type=RMV2ObjectSettings)
+    bpy.types.Collection.rmv2 = bpy.props.PointerProperty(
+        type=RMV2CollectionSettings)
+
+
+def unregister():
+    del bpy.types.Collection.rmv2
+    del bpy.types.Object.rmv2
+    for cls in reversed(CLASSES):
+        bpy.utils.unregister_class(cls)
