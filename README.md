@@ -96,16 +96,19 @@ the 4.1 normals API changes are in place).
 
 ## Installation
 
-**As an extension (Blender 4.2+):** zip the `io_scene_rmv2` folder and use
-*Edit → Preferences → Get Extensions → Install from Disk*, or:
+Download the zip from the [latest release](https://github.com/robert-d-schultz/rmv2_anim_blender_import_export/releases/latest).
+
+**As an extension (Blender 4.2+):** *Edit → Preferences → Get Extensions →
+Install from Disk*, and point it at the downloaded zip.
+
+**As a legacy add-on (3.6+):** *Edit → Preferences → Add-ons → Install*,
+point it at the downloaded zip, then enable "Total War RigidModel".
+
+Building the zip yourself instead of downloading it:
 
 ```
 blender --command extension build --source-dir io_scene_rmv2
 ```
-
-**As a legacy add-on (3.6+):** zip `io_scene_rmv2` and use
-*Edit → Preferences → Add-ons → Install*, then enable
-"Total War RigidModel".
 
 Set the **Texture Root Directory** in the add-on preferences to a folder
 with extracted game textures (RPFM / AssetEditor dumps) if you want
