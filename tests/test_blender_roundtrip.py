@@ -73,11 +73,14 @@ def make_cube_mesh(weight_count):
         mesh.bone_indices[:, 1] = 3
         mesh.bone_weights[:, 0] = 0.7
         mesh.bone_weights[:, 1] = 0.3
+    # wound so cross((v1-v0),(v2-v0)) matches the outward per-vertex normal
+    # above - verified against real RMV2 assets, which need no winding
+    # reversal on import/export
     quads = [(0, 1, 2, 3), (4, 7, 6, 5), (0, 4, 5, 1),
              (1, 5, 6, 2), (2, 6, 7, 3), (3, 7, 4, 0)]
     tris = []
     for q in quads:
-        tris += [q[0], q[1], q[2], q[0], q[2], q[3]]
+        tris += [q[2], q[1], q[0], q[3], q[2], q[0]]
     mesh.indices = np.array(tris, dtype=np.uint16)
     return mesh
 
@@ -215,6 +218,22 @@ def roundtrip_case(tmpdir, version, vertex_format, label):
     obj = lod0.objects[0]
     check(len(obj.data.vertices) == 8, "8 vertices imported (no welding)")
     check(len(obj.data.polygons) == 12, "12 triangles imported")
+
+    # Triangle winding (geometric face normal) must agree with the shading
+    # (custom split) normal - a prior bug had these backwards for every real
+    # RMV2 asset while this fixture's own winding happened to hide it.
+    me = obj.data
+    cn = me.corner_normals
+    bad = 0
+    for poly in me.polygons:
+        pn = np.array(poly.normal)
+        loop_ns = np.array([cn[li].vector for li in
+                            range(poly.loop_start,
+                                  poly.loop_start + poly.loop_total)])
+        if np.dot(pn, loop_ns.mean(axis=0)) <= 0:
+            bad += 1
+    check(bad == 0,
+          f"face winding matches shading normal ({12 - bad}/12 agree)")
 
     # world-space positions must match the file
     mesh_file = original.lods[0].models[0].mesh
@@ -552,6 +571,22 @@ def material_node_case():
     normal_src = link_source(bsdf.inputs["Normal"])
     check(normal_src is not None and normal_src.type == "NORMAL_MAP",
           "Normal still wired through a Normal Map node")
+    if normal_src is not None:
+        decode_node = link_source(normal_src.inputs["Color"])
+        check(decode_node is not None and decode_node.type == "GROUP",
+              "Normal Map's Color fed by the orange-decode group, not the "
+              "raw texture directly")
+        if decode_node is not None:
+            normal_tex_node = tree.nodes.get("Normal")
+            decode_colour_src = link_source(decode_node.inputs["Color"])
+            decode_alpha_src = link_source(decode_node.inputs["Alpha"])
+            check(normal_tex_node is not None
+                  and decode_colour_src is not None
+                  and decode_colour_src.name == normal_tex_node.name
+                  and decode_alpha_src is not None
+                  and decode_alpha_src.name == normal_tex_node.name,
+                  "decode group's Color and Alpha both sourced from the "
+                  "Normal texture (not stuck at defaults)")
 
     spec_in = bsdf.inputs.get("Specular IOR Level")
     check(spec_in is not None and link_source(spec_in) is not None,
@@ -571,7 +606,7 @@ def material_node_case():
           "no two nodes share the exact same location")
     collapsed = {n.name for n in tree.nodes if n.hide}
     expected_collapsed_types = {"SEPARATE_COLOR", "SEPRGB", "MIX_RGB",
-                               "NORMAL_MAP", "INVERT"}
+                               "NORMAL_MAP", "INVERT", "GROUP"}
     check(collapsed and all(
         tree.nodes[n].type in expected_collapsed_types for n in collapsed),
         f"intermediate utility nodes are collapsed for a compact graph "

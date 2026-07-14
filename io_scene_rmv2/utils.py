@@ -3,15 +3,22 @@
 Coordinate convention
 ---------------------
 RMV2 stores data in the game's space: right-handed, Y-up (this is how
-AssetEditor's MonoGame renderer consumes it verbatim), with clockwise
-triangle winding for front faces (DirectX convention).
+AssetEditor's MonoGame renderer consumes it verbatim).
 
-Blender is right-handed, Z-up with counter-clockwise front faces, so:
+Blender is right-handed, Z-up, so:
 
     blender (x, y, z) = (game.x, -game.z, game.y)      # +90deg around X
     game    (x, y, z) = (blender.x, blender.z, -blender.y)
 
-and triangle winding is reversed in both directions.
+This is a pure rotation (determinant +1), so it preserves orientation:
+cross products/winding carry straight through unchanged. Real RMV2 files
+confirm this empirically (checked against their own stored per-vertex
+normals across multiple assets) - front-facing triangles use the same
+winding, in either space, as Blender's counter-clockwise convention, so
+import/export must NOT reverse triangle winding. `reverse_winding` is
+kept only for the export-side case of an object with a mirrored
+(negative-determinant) transform, whose baked-in reflection flips
+orientation once and needs exactly one compensating reversal.
 
 This module has no bpy dependency (numpy only) so it stays testable.
 """

@@ -645,8 +645,10 @@ def build_model(context, obj, options, attach_points, attach_names,
             mesh.bone_weights = vert_bone_wgt[src_vidx]
 
         tris = inverse[arrays["tri_loops"].reshape(-1)].reshape(-1, 3)
-        if not arrays["mirrored"]:
-            tris = utils.reverse_winding(tris)  # Blender CCW -> DirectX CW
+        if arrays["mirrored"]:
+            # A mirrored (negative-determinant) transform flips orientation
+            # once; compensate so the exported winding stays front-facing.
+            tris = utils.reverse_winding(tris)
         mesh.indices = tris.ravel().astype(np.uint16)
 
         material = _material_from_settings(obj, settings, fmt, scale,

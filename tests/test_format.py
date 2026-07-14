@@ -48,12 +48,14 @@ def make_cube_mesh(weight_count=4, bone_a=0, bone_b=3):
         wgt[:, 1] = 0.3
         mesh.bone_indices = idx
         mesh.bone_weights = wgt
-    # 12 triangles of a cube
+    # 12 triangles of a cube (wound so cross((v1-v0),(v2-v0)) matches the
+    # outward per-vertex normal above - verified against real RMV2 assets,
+    # which need no winding reversal on import/export)
     quads = [(0, 1, 2, 3), (4, 7, 6, 5), (0, 4, 5, 1),
              (1, 5, 6, 2), (2, 6, 7, 3), (3, 7, 4, 0)]
     tris = []
     for q in quads:
-        tris += [q[0], q[1], q[2], q[0], q[2], q[3]]
+        tris += [q[2], q[1], q[0], q[3], q[2], q[0]]
     mesh.indices = np.array(tris, dtype=np.uint16)
     return mesh
 

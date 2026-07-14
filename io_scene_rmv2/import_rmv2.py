@@ -9,12 +9,12 @@ Scene layout created per file:
       ...
       <name>_attach         (optional attachment point empties)
 
-Vertices are converted to Blender space, winding is flipped, UV V is
-flipped, normals become custom split normals, bone weights become vertex
-groups named after the selected armature's bones, else the standard
-bone_<i> fallback (a later .anim import renames them). The mesh pivot
-becomes the object origin. With an armature selected the meshes are
-parented to it with an armature modifier.
+Vertices are converted to Blender space (triangle winding carries through
+unchanged - see utils.py), UV V is flipped, normals become custom split
+normals, bone weights become vertex groups named after the selected
+armature's bones, else the standard bone_<i> fallback (a later .anim
+import renames them). The mesh pivot becomes the object origin. With an
+armature selected the meshes are parented to it with an armature modifier.
 """
 
 from __future__ import annotations
@@ -174,7 +174,6 @@ def _build_mesh_object(model, version: int, name: str, scale: float,
     me.vertices.foreach_set("co", local.ravel())
 
     tris = mesh_data.indices.reshape(-1, 3).astype(np.int32)
-    tris = utils.reverse_winding(tris)          # DirectX CW -> Blender CCW
     nloops = tris.size
     me.loops.add(nloops)
     me.loops.foreach_set("vertex_index", tris.ravel())

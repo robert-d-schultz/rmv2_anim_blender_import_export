@@ -5,12 +5,15 @@ material.  Texture paths inside the file are pack-relative
 (``variantmeshes\\...\\foo.dds``); they are resolved against a user supplied
 "texture root" directory (add-on preference, overridable per import).
 
-Two CA-specific texture packing conventions are unpacked into proper node
-graphs rather than just being dropped:
+Several CA-specific texture packing conventions are unpacked into proper
+node graphs rather than just being dropped:
   - MaterialMap (id 29): R = metallic, G = roughness.
   - Mask (id 3): RGB channels select where up to 3 adjustable "player
     colour" tints are painted onto the base colour (faction colouring);
     alpha drives emission strength (banners, glowing bits, etc).
+  - Normal (id 1): packed "orange" style (R=1, G=Y, B=0, A=X, Z
+    reconstructed) rather than a standard tangent-space RGB normal map;
+    unpacked by a cached node group, see _get_orange_normal_group().
 
 The node tree is a *preview* nicety only — the exporter reads texture paths
 from the RMV2 object settings, never from these nodes.
@@ -135,6 +138,107 @@ def _new_mix_rgb(tree, location, label, fac_socket, colour_a, colour_b):
     return mix.outputs["Color"]
 
 
+def _new_combine_rgb(tree, location, r, g, b):
+    """ShaderNodeCombineRGB was folded into ShaderNodeCombineColor in
+    Blender 4.0; support both. r/g/b are each either a socket (linked) or
+    a plain number (default_value)."""
+    try:
+        node = tree.nodes.new("ShaderNodeCombineColor")
+        node.mode = "RGB"
+        sockets = (node.inputs["Red"], node.inputs["Green"],
+                  node.inputs["Blue"])
+    except RuntimeError:
+        node = tree.nodes.new("ShaderNodeCombineRGB")
+        sockets = (node.inputs["R"], node.inputs["G"], node.inputs["B"])
+    node.location = location
+    node.hide = True
+    for socket, value in zip(sockets, (r, g, b)):
+        if isinstance(value, (int, float)):
+            socket.default_value = value
+        else:
+            tree.links.new(value, socket)
+    return node.outputs["Color"]
+
+
+def _new_math(tree, operation, location, *values):
+    """ShaderNodeMath with 1-3 inputs. Each of `values` is either a socket
+    (linked) or a plain number (default_value). Returns the Value output."""
+    node = tree.nodes.new("ShaderNodeMath")
+    node.operation = operation
+    node.location = location
+    node.hide = True
+    for i, value in enumerate(values):
+        if isinstance(value, (int, float)):
+            node.inputs[i].default_value = value
+        else:
+            tree.links.new(value, node.inputs[i])
+    return node.outputs[0]
+
+
+_ORANGE_NORMAL_GROUP = "RMV2 Orange Normal Decode"
+
+
+def _get_orange_normal_group() -> bpy.types.ShaderNodeTree:
+    """Total War's Warscape engine packs normal maps in what modders call
+    the "orange" layout (named for the R=1/B=0 filler channels giving the
+    raw DDS an orange tint if viewed directly): R=1 (constant), G=Y
+    (bump direction), B=0 (constant), A=X. Z is never stored - it's
+    reconstructed from X/Y at render time.
+
+    Decoded exactly the way the game's own live shader does it
+    (GetPixelNormal() in TheAssetEditor's MathFunctions.hlsli, included
+    by both its PBR shaders): X = R*A, Y = 1-2*G, Z = sqrt(1-X^2-Y^2).
+    Note the green channel is NOT un-gamma'd here even though CA's own
+    export tooling (BlueToOrangeNormalMapProcessor) boosts it by ^(1/2.2)
+    on the way in - the live shader reads it raw, so matching that (not
+    the theoretically "correct" inverse) is what stays faithful to how
+    the game actually renders these textures.
+
+    Repacked to [0,1] on the way out so it can feed a standard Normal Map
+    node same as any other tangent-space normal map. Built once and cached
+    in bpy.data.node_groups; every material with a Normal texture gets its
+    own ShaderNodeGroup instance pointing at this."""
+    existing = bpy.data.node_groups.get(_ORANGE_NORMAL_GROUP)
+    if existing is not None:
+        return existing
+
+    ng = bpy.data.node_groups.new(_ORANGE_NORMAL_GROUP, "ShaderNodeTree")
+    ng.interface.new_socket("Color", in_out="INPUT",
+                            socket_type="NodeSocketColor")
+    ng.interface.new_socket("Alpha", in_out="INPUT",
+                            socket_type="NodeSocketFloat")
+    ng.interface.new_socket("Color", in_out="OUTPUT",
+                            socket_type="NodeSocketColor")
+
+    group_in = ng.nodes.new("NodeGroupInput")
+    group_in.location = (-1500, 0)
+    group_out = ng.nodes.new("NodeGroupOutput")
+    group_out.location = (1500, 0)
+    alpha = group_in.outputs["Alpha"]
+
+    sep, r, g, _b = _new_separate_rgb(ng, (-1200, 200))
+    ng.links.new(group_in.outputs["Color"], sep.inputs["Color"])
+
+    x_raw = _new_math(ng, "MULTIPLY", (-900, 200), r, alpha)
+    x_signed = _new_math(ng, "MULTIPLY_ADD", (-600, 200), x_raw, 2.0, -1.0)
+    y_signed = _new_math(ng, "MULTIPLY_ADD", (-600, -200), g, -2.0, 1.0)
+
+    x2 = _new_math(ng, "MULTIPLY", (-300, 200), x_signed, x_signed)
+    y2 = _new_math(ng, "MULTIPLY", (-300, -200), y_signed, y_signed)
+    sum2 = _new_math(ng, "ADD", (0, 0), x2, y2)
+    zsq = _new_math(ng, "SUBTRACT", (300, 0), 1.0, sum2)
+    zsq_clamped = _new_math(ng, "MAXIMUM", (600, 0), zsq, 0.0)
+    z = _new_math(ng, "SQRT", (900, 0), zsq_clamped)
+
+    x_col = _new_math(ng, "MULTIPLY_ADD", (1200, 200), x_signed, 0.5, 0.5)
+    y_col = _new_math(ng, "MULTIPLY_ADD", (1200, -200), y_signed, 0.5, 0.5)
+    z_col = _new_math(ng, "MULTIPLY_ADD", (1200, 0), z, 0.5, 0.5)
+
+    combined = _new_combine_rgb(ng, (1350, 0), x_col, y_col, z_col)
+    ng.links.new(combined, group_out.inputs["Color"])
+    return ng
+
+
 def build_material(name: str, textures: list, alpha_mode: str,
                    texture_root: str) -> bpy.types.Material:
     """Create a Blender material for a list of (texture_type, path) pairs."""
@@ -237,10 +341,19 @@ def build_material(name: str, textures: list, alpha_mode: str,
 
     normal_node = by_type.get(_TT_NORMAL)
     if normal_node is not None:
+        decode = tree.nodes.new("ShaderNodeGroup")
+        decode.node_tree = _get_orange_normal_group()
+        decode.label = "Orange -> Normal"
+        decode.location = (_COL_SEP, normal_node.location.y)
+        decode.hide = True
+        tree.links.new(normal_node.outputs["Color"], decode.inputs["Color"])
+        tree.links.new(normal_node.outputs["Alpha"], decode.inputs["Alpha"])
+
         nm = tree.nodes.new("ShaderNodeNormalMap")
+        nm.space = "TANGENT"
         nm.location = (_COL_PROC, normal_node.location.y)
         nm.hide = True
-        tree.links.new(normal_node.outputs["Color"], nm.inputs["Color"])
+        tree.links.new(decode.outputs["Color"], nm.inputs["Color"])
         tree.links.new(nm.outputs["Normal"], bsdf.inputs["Normal"])
 
     # MaterialMap (R=metallic, G=roughness) takes priority over Gloss, since
