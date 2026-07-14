@@ -2,23 +2,35 @@
 
 Coordinate convention
 ---------------------
-RMV2 stores data in the game's space: right-handed, Y-up (this is how
-AssetEditor's MonoGame renderer consumes it verbatim).
+RMV2 stores data in the game's space: Y-up and effectively LEFT-handed.
+The proof is in AssetEditor's own renderer (Camera.cs): it multiplies its
+projection matrix by CreateScale(-1, 1, 1), mirroring the whole viewport
+horizontally so the raw right-handed MonoGame render matches how the game
+actually displays the data. A model imported into Blender (right-handed)
+without a compensating reflection therefore appears mirrored compared to
+the game - confirmed on real assets viewed side by side with Terry.
 
-Blender is right-handed, Z-up, so:
+Blender is right-handed, Z-up, so the conversion carries exactly one
+reflection (determinant -1):
 
-    blender (x, y, z) = (game.x, -game.z, game.y)      # +90deg around X
-    game    (x, y, z) = (blender.x, blender.z, -blender.y)
+    blender (x, y, z) = (-game.x, -game.z, game.y)
+    game    (x, y, z) = (-blender.x, blender.z, -blender.y)
 
-This is a pure rotation (determinant +1), so it preserves orientation:
-cross products/winding carry straight through unchanged. Real RMV2 files
-confirm this empirically (checked against their own stored per-vertex
-normals across multiple assets) - front-facing triangles use the same
-winding, in either space, as Blender's counter-clockwise convention, so
-import/export must NOT reverse triangle winding. `reverse_winding` is
-kept only for the export-side case of an object with a mirrored
-(negative-determinant) transform, whose baked-in reflection flips
-orientation once and needs exactly one compensating reversal.
+Negating X (rather than some other axis) makes AssetEditor's default view
+correspond to Blender's front view: a game character facing game +Z faces
+Blender -Y.
+
+Consequences of the reflection:
+- Triangle winding flips orientation once, so import AND export each
+  reverse winding once (`reverse_winding`). On export this XORs with the
+  compensation for an object's own mirrored (negative-determinant)
+  transform: such objects need NO extra reversal.
+- Stored per-vertex normals in real files agree with the CCW cross
+  product of the raw game-space winding, so after the mapping + reversal
+  Blender's geometric CCW normals agree with the imported split normals.
+- Quaternions are conjugated by the reflection: the vector part maps
+  through the linear map *negated* (pseudo-vector rule), w is unchanged.
+  See import_anim/export_anim.
 
 This module has no bpy dependency (numpy only) so it stays testable.
 """
@@ -27,8 +39,8 @@ from __future__ import annotations
 
 import numpy as np
 
-_G2B_SIGN = np.array([1.0, -1.0, 1.0], dtype=np.float32)
-_B2G_SIGN = np.array([1.0, 1.0, -1.0], dtype=np.float32)
+_G2B_SIGN = np.array([-1.0, -1.0, 1.0], dtype=np.float32)
+_B2G_SIGN = np.array([-1.0, 1.0, -1.0], dtype=np.float32)
 
 
 def game_to_blender(arr: np.ndarray) -> np.ndarray:
@@ -45,11 +57,11 @@ def blender_to_game(arr: np.ndarray) -> np.ndarray:
 
 def game_to_blender_v(v) -> tuple:
     """Single vector variant."""
-    return (float(v[0]), -float(v[2]), float(v[1]))
+    return (-float(v[0]), -float(v[2]), float(v[1]))
 
 
 def blender_to_game_v(v) -> tuple:
-    return (float(v[0]), float(v[2]), -float(v[1]))
+    return (-float(v[0]), float(v[2]), -float(v[1]))
 
 
 def flip_uv_v(uv: np.ndarray) -> np.ndarray:

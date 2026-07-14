@@ -29,7 +29,10 @@ the 4.1 normals API changes are in place).
   by a later `.anim` import), or the bones' names directly when an
   armature is selected during import. Attachment points are stored as an
   editable list on the root collection.
-- Mesh pivot becomes the object origin.
+- Mesh pivot becomes the object origin (file vertices are pivot-relative;
+  the game renders them offset by the pivot, and the importer reproduces
+  that placement). On export the object's world translation is written as
+  the pivot; rotation/scale are baked into the vertices.
 - Blender materials built from the file's texture list; textures resolved
   against a configurable **texture root** folder (add-on preferences).
   BaseColour/Diffuse, Normal, Gloss and Specular are wired into a
@@ -206,10 +209,12 @@ from selected meshes.
 
 ## Conventions & gotchas
 
-- Coordinates: game is Y-up right-handed, Blender Z-up — the add-on
-  converts (`blender = (x, -z, y)`), flips triangle winding
-  (DirectX CW ↔ Blender CCW) and flips the UV V axis. What you see in
-  Blender is oriented correctly; export reverses all of it.
+- Coordinates: game is Y-up and effectively left-handed (AssetEditor
+  mirrors its whole viewport with a `Scale(-1,1,1)` projection to match
+  the game), Blender is Z-up right-handed — the add-on converts
+  (`blender = (-x, -z, y)`, one reflection), reverses triangle winding to
+  compensate, and flips the UV V axis. What you see in Blender matches
+  the in-game orientation (not mirrored); export reverses all of it.
 - Vertices are welded per unique position/normal/tangent/UV/colour at
   *file* precision; hard edges and UV seams split vertices, so counts can
   differ from Blender's — max 65 536 unique vertices per mesh (16-bit

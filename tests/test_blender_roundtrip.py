@@ -74,8 +74,9 @@ def make_cube_mesh(weight_count):
         mesh.bone_weights[:, 0] = 0.7
         mesh.bone_weights[:, 1] = 0.3
     # wound so cross((v1-v0),(v2-v0)) matches the outward per-vertex normal
-    # above - verified against real RMV2 assets, which need no winding
-    # reversal on import/export
+    # above, like real RMV2 assets (verified against their stored normals).
+    # The game->Blender map mirrors once, so the importer reverses winding
+    # to keep faces front-facing; the exporter reverses it back.
     quads = [(0, 1, 2, 3), (4, 7, 6, 5), (0, 4, 5, 1),
              (1, 5, 6, 2), (2, 6, 7, 3), (3, 7, 4, 0)]
     tris = []
@@ -235,16 +236,19 @@ def roundtrip_case(tmpdir, version, vertex_format, label):
     check(bad == 0,
           f"face winding matches shading normal ({12 - bad}/12 agree)")
 
-    # world-space positions must match the file
+    # world-space positions must match what the game renders: file
+    # positions are pivot-relative, the renderer adds the pivot
+    # (a prior bug subtracted the pivot from the mesh instead, so the
+    # displayed geometry ignored it entirely)
     mesh_file = original.lods[0].models[0].mesh
+    pivot_b = np.array(utils.game_to_blender_v(
+        original.lods[0].models[0].material.pivot), np.float32)
     world = np.array([obj.matrix_world @ v.co for v in obj.data.vertices],
                      dtype=np.float32)
-    expected = utils.game_to_blender(mesh_file.positions)
+    expected = utils.game_to_blender(mesh_file.positions) + pivot_b
     err = np.abs(np.sort(world.ravel()) - np.sort(expected.ravel())).max()
-    check(err < 2e-3, f"world positions match file (max err {err:.5f})")
+    check(err < 2e-3, f"world positions match file+pivot (max err {err:.5f})")
 
-    pivot_b = utils.game_to_blender_v(
-        original.lods[0].models[0].material.pivot)
     check(np.allclose(obj.location, pivot_b, atol=1e-5),
           "pivot became object origin")
 
@@ -962,6 +966,9 @@ def anim_flow2_case(tmpdir):
         handle.write(rf.save(make_file(7, rf.VF_CINEMATIC,
                                        with_attach_points=False)))
     root, stats = import_rmv2.import_file(bpy.context, rmv_path, {})
+    check([c.name for c in arm_obj.users_collection] == [root.name],
+          "armature moved into the model's root collection, out of the "
+          f"scene collection ({[c.name for c in arm_obj.users_collection]})")
     meshes = [o for o in root.all_objects if o.type == "MESH"]
     for obj in meshes:
         names = {g.name for g in obj.vertex_groups}

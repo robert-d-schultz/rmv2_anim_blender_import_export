@@ -9,12 +9,16 @@ Scene layout created per file:
       ...
       <name>_attach         (optional attachment point empties)
 
-Vertices are converted to Blender space (triangle winding carries through
-unchanged - see utils.py), UV V is flipped, normals become custom split
+Vertices are converted to Blender space (the conversion mirrors once, so
+triangle winding is reversed to compensate - see utils.py), UV V is
+flipped, normals become custom split
 normals, bone weights become vertex groups named after the selected
 armature's bones, else the standard bone_<i> fallback (a later .anim
-import renames them). The mesh pivot becomes the object origin. With an
-armature selected the meshes are parented to it with an armature modifier.
+import renames them). File vertices are pivot-relative (the game renders
+raw + pivot), so they become the mesh-local coordinates and the pivot
+becomes the object origin. With an armature selected the meshes are
+parented to it with an armature modifier and the armature is moved into
+the root collection so the skeleton travels with the model.
 """
 
 from __future__ import annotations
@@ -165,15 +169,21 @@ def _build_mesh_object(model, version: int, name: str, scale: float,
     me = bpy.data.meshes.new(name)
     n = mesh_data.vertex_count
 
+    # File positions are pivot-relative: the game renders raw + pivot
+    # (AssetEditor Rmv2MeshNode: ModelMatrix * Translation(PivotPoint)),
+    # so they map straight onto mesh-local coords with the pivot as the
+    # object origin.
     pivot_b = np.array(
         utils.game_to_blender_v(material.pivot), np.float32) * scale
     pos_b = utils.game_to_blender(mesh_data.positions) * scale
-    local = pos_b - pivot_b[None, :]
 
     me.vertices.add(n)
-    me.vertices.foreach_set("co", local.ravel())
+    me.vertices.foreach_set("co", pos_b.ravel())
 
-    tris = mesh_data.indices.reshape(-1, 3).astype(np.int32)
+    # The game->Blender map is a reflection (det -1), so winding must be
+    # reversed once to keep faces front-facing (see utils.py).
+    tris = utils.reverse_winding(
+        mesh_data.indices.reshape(-1, 3)).astype(np.int32)
     nloops = tris.size
     me.loops.add(nloops)
     me.loops.foreach_set("vertex_index", tris.ravel())
@@ -220,10 +230,11 @@ def _build_mesh_object(model, version: int, name: str, scale: float,
 
 
 def _attach_matrix_to_blender(matrix12, scale: float) -> Matrix:
-    """3x4 row-major game matrix -> Blender world matrix."""
+    """3x4 row-major game matrix -> Blender world matrix (conjugated by
+    the game->Blender map from utils.py)."""
     m = Matrix((matrix12[0:4], matrix12[4:8], matrix12[8:12],
                 (0.0, 0.0, 0.0, 1.0)))
-    conv = Matrix(((1, 0, 0, 0), (0, 0, -1, 0), (0, 1, 0, 0), (0, 0, 0, 1)))
+    conv = Matrix(((-1, 0, 0, 0), (0, 0, -1, 0), (0, 1, 0, 0), (0, 0, 0, 1)))
     out = conv @ m @ conv.inverted()
     out.translation = out.translation * scale
     return out
@@ -267,6 +278,16 @@ def _collect_attach_points(rmv: rf.RmvFile):
 # Entry point
 # ---------------------------------------------------------------------------
 
+def _adopt_armature(root, armature):
+    """Move an existing armature into the model's root collection so the
+    skeleton travels with the model it now drives.  Links into other RMV2
+    roots are kept - one skeleton may serve several imported models."""
+    for col in list(armature.users_collection):
+        if not col.rmv2.is_rmv2_root:
+            col.objects.unlink(armature)
+    root.objects.link(armature)
+
+
 def import_file(context, filepath: str, options: dict):
     """Import one .rigid_model_v2 file. Returns (root_collection, stats)."""
     with open(filepath, "rb") as handle:
@@ -291,6 +312,8 @@ def import_file(context, filepath: str, options: dict):
     armature = None
     if options.get("attach_armature", True):
         armature = skeleton.find_context_armature(context)
+    if armature is not None:
+        _adopt_armature(root, armature)
 
     attach_points = _collect_attach_points(rmv)
     bone_names = {}

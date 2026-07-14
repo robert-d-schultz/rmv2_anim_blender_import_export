@@ -4,7 +4,9 @@ Pipeline per mesh object:
   evaluated mesh (modifiers applied, armature deform excluded)
   -> triangulated via loop triangles (non-destructive)
   -> per-loop position/normal/tangent/uv/colour gathered with numpy
-  -> transformed to world space, then converted to game space
+  -> rotation/scale of the world transform baked in (the translation is
+     written as the material pivot; the game adds it back at render time),
+     then converted to game space
   -> quantized to file precision and welded into unique vertices
   -> bone weights resolved from vertex groups (attachment-point names,
      bone_<i> names, or armature bone order)
@@ -347,7 +349,9 @@ def _fallback_tangents(positions, uvs, normals, tri_loops, loop_vidx):
 
 def extract_mesh_arrays(context, obj, options, warnings,
                         decimate_ratio=1.0):
-    """Evaluated, triangulated, world-space per-loop arrays (Blender space).
+    """Evaluated, triangulated per-loop arrays (Blender space), with the
+    rotation/scale of the world transform applied but not its translation
+    (positions are pivot-relative, matching the file format).
 
     A decimate_ratio < 1 appends a temporary collapse-Decimate modifier
     (auto-LOD generation). Returns dict or None if the mesh has no faces."""
@@ -426,10 +430,13 @@ def extract_mesh_arrays(context, obj, options, warnings,
         # Per-vertex weights (indices into obj.vertex_groups resolved later)
         weight_source_me = me
 
-        # World transform
+        # World transform. Positions get only the rotation/scale part:
+        # the translation is written as the material pivot instead, and
+        # the game adds it back at render time (raw + pivot), so baking
+        # it into the vertices would apply it twice.
         mw = np.array(obj.matrix_world, dtype=np.float64)
         m3 = mw[:3, :3]
-        positions_w = positions @ m3.T + mw[:3, 3]
+        positions_w = positions @ m3.T
         det = float(np.linalg.det(m3))
         if abs(det) < 1e-12:
             source.to_mesh_clear()
@@ -451,7 +458,7 @@ def extract_mesh_arrays(context, obj, options, warnings,
 
         result = {
             "loop_vidx": loop_vidx,
-            "positions_world": positions_w.astype(np.float32),
+            "positions_pivot_rel": positions_w.astype(np.float32),
             "normals": normals_w,
             "tangents": tangents_w,
             "binormals": binormals_w,
@@ -588,7 +595,8 @@ def build_model(context, obj, options, attach_points, attach_names,
         nl = len(loop_vidx)
 
         # --- convert to game space -------------------------------------
-        pos_game = utils.blender_to_game(arrays["positions_world"]) * scale
+        pos_game = utils.blender_to_game(
+            arrays["positions_pivot_rel"]) * scale
         normals_g = utils.blender_to_game(arrays["normals"])
         tangents_g = utils.blender_to_game(arrays["tangents"])
         binormals_g = utils.blender_to_game(arrays["binormals"])
@@ -645,9 +653,11 @@ def build_model(context, obj, options, attach_points, attach_names,
             mesh.bone_weights = vert_bone_wgt[src_vidx]
 
         tris = inverse[arrays["tri_loops"].reshape(-1)].reshape(-1, 3)
-        if arrays["mirrored"]:
-            # A mirrored (negative-determinant) transform flips orientation
-            # once; compensate so the exported winding stays front-facing.
+        if not arrays["mirrored"]:
+            # The Blender->game map is a reflection (det -1), flipping
+            # orientation once, so winding is reversed to compensate. An
+            # object's own mirrored (negative-determinant) transform flips
+            # a second time and the two cancel out.
             tris = utils.reverse_winding(tris)
         mesh.indices = tris.ravel().astype(np.uint16)
 

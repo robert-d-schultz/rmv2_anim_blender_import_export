@@ -14,7 +14,7 @@ order and are attached/renamed to match.
 bl_info = {
     "name": "Total War RigidModel (.rigid_model_v2, .anim)",
     "author": "rob + Claude",
-    "version": (1, 2, 0),
+    "version": (1, 3, 0),
     "blender": (3, 6, 0),
     "location": "File > Import-Export",
     "description": "Import-Export Total War RigidModel v2 meshes "

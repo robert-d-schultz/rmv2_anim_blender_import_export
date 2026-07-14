@@ -47,17 +47,19 @@ class AnimImportError(Exception):
 
 
 # ---------------------------------------------------------------------------
-# Coordinate conversion (game: right-handed Y-up -> Blender: Z-up)
+# Coordinate conversion (game: Y-up, effectively left-handed -> Blender:
+# Z-up right-handed; the map mirrors once - see utils.py)
 # ---------------------------------------------------------------------------
 
 def game_to_blender_translation(t) -> Vector:
-    return Vector((float(t[0]), -float(t[2]), float(t[1])))
+    return Vector((-float(t[0]), -float(t[2]), float(t[1])))
 
 
 def game_to_blender_quaternion(q) -> Quaternion:
-    """File order is xyzw; Blender wants wxyz. The vector part transforms
-    like a direction."""
-    quat = Quaternion((float(q[3]), float(q[0]), -float(q[2]), float(q[1])))
+    """File order is xyzw; Blender wants wxyz. Conjugation by a reflection:
+    the axis (vector part) maps through the linear map NEGATED
+    (pseudo-vector rule), the angle (w) is unchanged."""
+    quat = Quaternion((float(q[3]), float(q[0]), float(q[2]), -float(q[1])))
     if quat.magnitude > 1e-8:
         quat.normalize()
     else:

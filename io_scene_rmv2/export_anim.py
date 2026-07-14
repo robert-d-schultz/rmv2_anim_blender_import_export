@@ -32,12 +32,14 @@ class AnimExportError(Exception):
 
 
 def blender_to_game_translation(v):
-    return (float(v[0]), float(v[2]), -float(v[1]))
+    return (-float(v[0]), float(v[2]), -float(v[1]))
 
 
 def blender_to_game_quaternion_xyzw(q):
-    """Blender Quaternion (w,x,y,z) -> file order xyzw."""
-    return (float(q.x), float(q.z), -float(q.y), float(q.w))
+    """Blender Quaternion (w,x,y,z) -> file order xyzw. Conjugation by a
+    reflection: vector part maps through the linear map negated
+    (pseudo-vector rule) - the exact inverse of the import conversion."""
+    return (float(q.x), -float(q.z), float(q.y), float(q.w))
 
 
 def _bone_table(arm_obj):
