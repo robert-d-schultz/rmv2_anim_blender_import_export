@@ -576,6 +576,25 @@ def _resolve_material_id(settings, fmt: int) -> int:
     return rf.MATERIAL_IDS.get(settings.material_id, rf.MAT_DEFAULT)
 
 
+def _resolve_matrix_index(obj, settings) -> int:
+    """The bone/matrix a piece is attached to. Prefers the LIVE Child Of
+    constraint (skeleton.attach_to_bone, destructible-building pieces) over
+    the value stored at import time, so re-attaching a piece to a
+    different bone in Blender and exporting actually reflects the change
+    instead of silently re-writing whatever matrix_index the source file
+    happened to have. Falls back to the stored value when there's no such
+    constraint (or its bone isn't found on the target armature) - hand
+    -authored objects, or meshes that were never matrix_index-driven."""
+    for con in obj.constraints:
+        if (con.type == "CHILD_OF" and con.target is not None
+                and con.target.type == "ARMATURE" and con.subtarget):
+            index = skeleton.bone_index_by_name(con.target).get(
+                con.subtarget)
+            if index is not None:
+                return index
+    return settings.matrix_index
+
+
 def _material_from_settings(obj, settings, fmt: int, scale: float,
                             attach_points, options) -> rf.WeightedMaterial:
     extra = {}
@@ -594,7 +613,7 @@ def _material_from_settings(obj, settings, fmt: int, scale: float,
         texture_directory=settings.texture_directory,
         filters=settings.filters,
         pivot=tuple(v * scale for v in utils.blender_to_game_v(pivot_b)),
-        matrix_index=settings.matrix_index,
+        matrix_index=_resolve_matrix_index(obj, settings),
         parent_matrix_index=settings.parent_matrix_index,
     )
 

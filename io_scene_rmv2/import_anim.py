@@ -410,14 +410,25 @@ def _new_action_fcurves(arm_obj, name: str):
 
 def _fill_fcurves(fcurves, data_path: str, count: int, values,
                   frames, group_name: str):
-    """One fcurve per component; values is (num_frames, count)."""
+    """One fcurve per component; values is (num_frames, count).
+
+    The action-group keyword was renamed between the legacy Action.fcurves
+    (<= 4.3, `action_group=`) and the slotted-action ChannelbagFCurves
+    (>= 4.4, `group_name=`) - try both before giving up on grouping
+    entirely, so fcurves still land in a per-bone group in the Graph
+    Editor/Dope Sheet on current Blender instead of a flat ungrouped list.
+    """
     num = len(frames)
     for component in range(count):
         try:
             fcu = fcurves.new(data_path, index=component,
                               action_group=group_name)
         except TypeError:
-            fcu = fcurves.new(data_path, index=component)
+            try:
+                fcu = fcurves.new(data_path, index=component,
+                                  group_name=group_name)
+            except TypeError:
+                fcu = fcurves.new(data_path, index=component)
         fcu.keyframe_points.add(num)
         flat = [0.0] * (num * 2)
         for k in range(num):
@@ -440,13 +451,32 @@ def apply_animation(context, arm_obj, anim: af.AnimFile,
     index_to_pose = {}
     name_by_index = {i: (b.name or skeleton.fallback_bone_name(i))
                      for i, b in enumerate(bones)}
+    # Only bones this add-on itself stamped (build_armature) - NOT
+    # bone_index_pairs's position-fallback guess for foreign/hand-made
+    # armatures, which has no reliable relationship to the file's bone
+    # order and must not outrank a real name match below.
     stamped = {index: bone.name
-               for index, bone in skeleton.bone_index_pairs(arm_obj)}
+               for index, bone in skeleton.bone_index_pairs(arm_obj)
+               if bone.get(skeleton.BONE_INDEX_PROP) is not None}
     unmatched = []
     for i in range(len(bones)):
-        pb = arm_obj.pose.bones.get(name_by_index[i])
-        if pb is None and i in stamped:
+        # Prefer the index stamp over the raw file name: building-type
+        # files can give every bone the exact same literal name (e.g. a
+        # 131-bone destruction file where every bone is named
+        # "building_pieceNN_destructNN_anim" - the game addresses them by
+        # index/matrix_index, not name), which makes name-based lookup
+        # collapse every index onto the one bone that happens to have kept
+        # the un-suffixed name (build_armature/_unique_bone_names suffixes
+        # the rest as .001, .002, ...) - silently keying the same pose
+        # bone dozens of times and crashing on the 2nd+ fcurve insert. A
+        # genuine index stamp is unambiguous regardless of name
+        # collisions, so it goes first; name matching remains the primary
+        # path for armatures we didn't stamp ourselves.
+        pb = None
+        if i in stamped:
             pb = arm_obj.pose.bones.get(stamped[i])
+        if pb is None:
+            pb = arm_obj.pose.bones.get(name_by_index[i])
         if pb is None:
             pb = arm_obj.pose.bones.get(skeleton.fallback_bone_name(i))
         if pb is None:
@@ -548,14 +578,28 @@ def apply_animation(context, arm_obj, anim: af.AnimFile,
 # Attaching meshes
 # ---------------------------------------------------------------------------
 
-def rename_groups_and_attach(meshes, arm_obj, warnings) -> tuple:
+def rename_groups_and_attach(meshes, arm_obj, warnings,
+                             is_building=False) -> tuple:
     """Rename bone_<i> vertex groups to the armature's bone names and
-    attach each mesh. Returns (attached, renamed)."""
+    attach each mesh - rigidly to its matrix_index bone (Child Of, no
+    vertex groups/armature modifier) for building-type destructible
+    pieces imported before this armature existed (see
+    import_rmv2.import_file's own matrix_index attach, used when the
+    armature already exists at RMV2-import time - this is the same
+    attach for the opposite import order), or via armature modifier +
+    parent for normally-skinned meshes. Returns (attached, renamed)."""
     name_by_index = skeleton.bone_name_by_index(arm_obj)
     bone_names = {b.name for b in arm_obj.data.bones}
     attached = 0
     renamed = 0
     for obj in meshes:
+        if is_building and not obj.vertex_groups \
+                and obj.rmv2.matrix_index >= 0:
+            bone_name = name_by_index.get(obj.rmv2.matrix_index)
+            if bone_name:
+                skeleton.attach_matrix_index_mesh(obj, arm_obj, bone_name)
+                attached += 1
+                continue
         for vgroup in obj.vertex_groups:
             if vgroup.name in bone_names:
                 continue
@@ -692,7 +736,7 @@ def import_file(context, filepath: str, options: dict):
     attached = renamed = 0
     if options.get("attach_meshes", True):
         attached, renamed = rename_groups_and_attach(meshes, arm_obj,
-                                                     warnings)
+                                                     warnings, is_building)
 
     try:
         if bpy.ops.object.select_all.poll():

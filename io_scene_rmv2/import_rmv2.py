@@ -384,7 +384,8 @@ def import_file(context, filepath: str, options: dict):
             if attach_by_matrix_index and not obj.vertex_groups:
                 bone_name = bone_names.get(model.material.matrix_index)
                 if bone_name:
-                    skeleton.attach_to_bone(obj, armature, bone_name)
+                    skeleton.attach_matrix_index_mesh(obj, armature,
+                                                      bone_name)
             elif armature is not None and obj.vertex_groups:
                 skeleton.attach_mesh(obj, armature)
             stats["meshes"] += 1

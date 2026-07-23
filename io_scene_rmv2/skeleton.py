@@ -143,3 +143,21 @@ def attach_to_bone(obj, armature_obj, bone_name):
     con.target = armature_obj
     con.subtarget = bone_name
     con.inverse_matrix = Matrix.Identity(4)
+
+
+def attach_matrix_index_mesh(obj, armature_obj, bone_name: str) -> None:
+    """attach_to_bone, then clear the object's stored matrix_index.
+
+    RMV2ObjectSettings.matrix_index only needs to survive in the interim
+    between "the building piece was imported" and "the matching .anim was
+    imported and could attach it to a real bone" - whichever order that
+    happens in (see import_rmv2.import_file / import_anim.import_file,
+    which both call this once they have an armature to attach to). Once
+    the Child Of constraint exists it's the live source of truth for
+    which bone the piece follows (export_rmv2._resolve_matrix_index
+    prefers it over the stored number), so leaving the old number in
+    place too would just be a second, staler copy of the same fact that
+    can silently drift the moment someone re-attaches the piece to a
+    different bone in Blender."""
+    attach_to_bone(obj, armature_obj, bone_name)
+    obj.rmv2.matrix_index = -1

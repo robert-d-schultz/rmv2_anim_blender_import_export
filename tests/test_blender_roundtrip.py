@@ -1476,6 +1476,9 @@ def building_matrix_index_attach_case(tmpdir):
     check(child_of is not None and child_of.target is arm_obj
           and child_of.subtarget == "piece1",
           "rigidly constrained to the matrix_index bone via Child Of")
+    check(obj.rmv2.matrix_index == -1,
+          "stored matrix_index cleared once the live constraint exists "
+          "(the constraint is now the source of truth on export)")
     bpy.context.view_layer.update()
     piece1_world = game_world_positions(skel_anim, 0)[1]    # bone 'piece1'
     pos_err = (obj.matrix_world.translation - piece1_world).length
@@ -1486,6 +1489,166 @@ def building_matrix_index_attach_case(tmpdir):
     check(root.rmv2.lod_overrides[0].vertex_format == "STATIC",
           "auto-LOD defaults treat a building model as unrigged/Static, "
           "not Auto or Weighted, despite an armature being attached")
+
+    # Export must reflect the LIVE Child Of target, not just echo back
+    # the matrix_index stored at import time - editing which bone a piece
+    # follows (the whole point of exposing this as a real constraint
+    # instead of a baked-in number) and then exporting should write the
+    # NEW bone's index into the file.
+    child_of.subtarget = "root"    # was "piece1" (index 1); root is index 0
+    activate_collection(root.name)
+    export_path = os.path.join(tmpdir, "tower_piece_reattached.rigid_model_v2")
+    _, export_warnings = export_rmv2.export_file(bpy.context, export_path, {
+        "source": "AUTO", "version": "7", "skeleton_name": "",
+        "apply_modifiers": True, "high_precision": False,
+        "write_attach_points": False, "global_scale": 1.0,
+    })
+    print("  re-attach export warnings:", export_warnings or "none")
+    with open(export_path, "rb") as handle:
+        reexported = rf.load(handle.read())
+    exported_index = reexported.lods[0].models[0].material.matrix_index
+    check(exported_index == 0,
+          f"export follows the live Child Of retarget (root, index 0), "
+          f"not the stale imported matrix_index 1 ({exported_index})")
+
+
+def building_reverse_order_attach_case(tmpdir):
+    """Regression case reported by rob: importing the building RMV2 piece
+    FIRST, before any armature exists, then importing the matching .anim
+    afterward (selecting the piece's collection or the piece itself) used
+    to leave it stranded - rename_groups_and_attach (run when that later
+    .anim import builds the fresh armature) had no idea matrix_index
+    -driven pieces existed, so it unconditionally ran the vertex-group
+    -rigged attach_mesh path instead: no Child Of constraint was ever
+    created, and a pointless armature modifier got added to a mesh with no
+    vertex groups (which would misreport it as rigged for vertex-format
+    /LOD purposes, on top of just not moving to the right place)."""
+    print("\n=== Building matrix_index attach: RMV2 imported before .anim ===")
+    reset_scene()
+
+    rmv = rf.RmvFile(version=7, skeleton_name="")
+    mat = rf.WeightedMaterial(material_id=rf.MAT_DEFAULT,
+                              vertex_format=rf.VF_STATIC,
+                              model_name="piece1_mesh", matrix_index=1)
+    lod = rf.RmvLod(camera_distance=40.0, lod_level=0)
+    lod.models.append(rf.RmvModel(material=mat, mesh=make_cube_mesh(0)))
+    rmv.lods.append(lod)
+    rmv_path = os.path.join(tmpdir, "tower_piece_first.rigid_model_v2")
+    with open(rmv_path, "wb") as handle:
+        handle.write(rf.save(rmv))
+
+    # No armature exists yet - a plain RMV2 import with nothing selected.
+    root, stats = import_rmv2.import_file(bpy.context, rmv_path, {
+        "import_lods": "ALL", "build_materials": False,
+        "attach_armature": True, "global_scale": 1.0,
+    })
+    obj = next(o for o in root.all_objects if o.type == "MESH")
+    check(obj.rmv2.matrix_index == 1,
+          "matrix_index stored on the piece - no armature to attach to yet")
+    check(not any(c.type == "CHILD_OF" for c in obj.constraints),
+          "no constraint yet - there's no armature/bone to attach to")
+
+    skel_anim = af.build_simple(
+        7, "building", 20.0,
+        [af.AnimBone("root", -1), af.AnimBone("piece1", 0)],
+        np.array([[[0.0, 0.0, 0.0], [0.0, 1.0, 0.0]]] * 2, np.float32),
+        np.array([[[0.0, 0.0, 0.0, 1.0]] * 2] * 2, np.float32))
+    skel_path = write_anim(tmpdir, "tower_skeleton_after.anim", skel_anim)
+
+    activate_collection(root.name)    # simulates selecting the collection
+    arm_obj, anim_stats, warnings = import_anim.import_file(
+        bpy.context, skel_path, {})
+    print("  warnings:", warnings or "none")
+    check(arm_obj is not None
+          and arm_obj.data.rmv2.skeleton_name == "building",
+          "building armature built from the .anim after the RMV2 already "
+          "existed")
+
+    child_of = next((c for c in obj.constraints if c.type == "CHILD_OF"),
+                    None)
+    check(child_of is not None and child_of.target is arm_obj
+          and child_of.subtarget == "piece1",
+          "piece is now rigidly constrained to its matrix_index bone, "
+          "even though the RMV2 was imported before the .anim")
+    check(not any(mod.type == "ARMATURE" for mod in obj.modifiers),
+          "no armature modifier was added instead (that would misreport "
+          "the piece as rigged for vertex-format/LOD purposes)")
+    check(len(obj.vertex_groups) == 0, "still no vertex groups synthesized")
+    check(obj.rmv2.matrix_index == -1,
+          "stored matrix_index cleared once the live constraint exists")
+
+    bpy.context.view_layer.update()
+    piece1_world = game_world_positions(skel_anim, 0)[1]    # bone 'piece1'
+    pos_err = (obj.matrix_world.translation - piece1_world).length
+    check(pos_err < 1e-4,
+          f"piece actually moved to the matrix_index bone's position "
+          f"(err {pos_err:.6f})")
+
+
+def anim_duplicate_bone_names_case(tmpdir):
+    """Regression case for a real bug found in
+    C:\\Users\\rob\\Desktop\\rigidmodels\\buildings\\brt_wall_straight_20m
+    \\brt_wall_straight_20m_piece01_destruct01_anim.anim: destructible
+    -building animation files can give EVERY bone the exact same literal
+    name (131 bones, all named "building_pieceNN_destructNN_anim" in the
+    real file - the game addresses pieces by index/matrix_index, not
+    name). apply_animation used to match file bones to pose bones by raw
+    name first, which collapsed every duplicate-named index onto the one
+    armature bone that happened to keep the un-suffixed name
+    (build_armature/_unique_bone_names suffixes the rest as .001, .002,
+    ...) - silently keying the same pose bone over and over and crashing
+    on the 2nd+ fcurve insert with "F-Curve ... already exists in this
+    channelbag". Also exercises the related group_name/action_group
+    fcurve-grouping kwarg fallback (Blender >= 4.4 renamed it), hit in
+    the same traceback."""
+    print("\n=== .anim import: duplicate bone names (building file) ===")
+    reset_scene()
+
+    n = 4
+    bones = [af.AnimBone("piece_anim", -1) for _ in range(n)]
+    # Distinct per-bone motion so a wrong bone<->track pairing is easy to
+    # detect: bone i moves along +X by (i+1) units between frame 0 and 1.
+    frame0 = [(float(i), 0.0, 0.0) for i in range(n)]
+    frame1 = [(float(i) + i + 1.0, 0.0, 0.0) for i in range(n)]
+    rest_r = [(0.0, 0.0, 0.0, 1.0)] * n
+    anim = af.build_simple(
+        7, "building", 20.0, bones,
+        np.array([frame0, frame1], np.float32),
+        np.array([rest_r, rest_r], np.float32))
+    path = write_anim(tmpdir, "dup_names.anim", anim)
+
+    arm_obj, stats, warnings = import_anim.import_file(
+        bpy.context, path, {})
+    print("  warnings:", warnings or "none")
+    check(stats["keyed_bones"] == n,
+          f"all {n} bones keyed, not just the one that kept the "
+          f"un-suffixed name ({stats['keyed_bones']})")
+    check(len({b.name for b in arm_obj.data.bones}) == n,
+          "armature bone names de-duplicated (.001/.002/... suffixes)")
+
+    bpy.context.scene.frame_set(1)
+    bpy.context.view_layer.update()
+    expected = game_world_positions(anim, 1)
+    pairs = rmv2_skeleton.bone_index_pairs(arm_obj)
+    check(len(pairs) == n, f"all {n} bones index-stamped ({len(pairs)})")
+    for i, bone in pairs:
+        pb = arm_obj.pose.bones[bone.name]
+        world = (arm_obj.matrix_world @ pb.matrix).translation
+        err = (world - expected[i]).length
+        check(err < 1e-4,
+              f"bone {i} ('{bone.name}') keyed with its own track, not a "
+              f"collided one (err {err:.6f})")
+
+    action = arm_obj.animation_data.action
+    if hasattr(action, "slots"):
+        fcurves = action.layers[0].strips[0].channelbag(
+            action.slots[0]).fcurves
+    else:
+        fcurves = action.fcurves
+    groups = {fcu.group.name for fcu in fcurves if fcu.group is not None}
+    check(len(groups) == n,
+          f"fcurves still land in a per-bone group instead of ungrouped "
+          f"({len(groups)})")
 
 
 def auto_lod_override_case(tmpdir):
@@ -1700,6 +1863,8 @@ def main():
         anim_mode_gating_case(tmpdir)
         anim_auto_detect_case(tmpdir)
         building_matrix_index_attach_case(tmpdir)
+        building_reverse_order_attach_case(tmpdir)
+        anim_duplicate_bone_names_case(tmpdir)
         auto_lod_override_case(tmpdir)
         batch_export_case(tmpdir)
         anim_operator_case(tmpdir)
