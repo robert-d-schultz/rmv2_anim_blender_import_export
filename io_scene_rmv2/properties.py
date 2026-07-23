@@ -173,6 +173,28 @@ class RMV2AttachPoint(bpy.types.PropertyGroup):
         description="3x4 row-major rest matrix from the file (game space)")
 
 
+class RMV2LodOverride(bpy.types.PropertyGroup):
+    """One row of the auto-LOD ('Generate LODs') override list: the
+    settings LOD `n` (row index n) should get when the exporter expands a
+    single mesh set into several LODs. See export_rmv2.expand_auto_lods."""
+    vertex_format: EnumProperty(
+        name="Vertex Format", items=VERTEX_FORMAT_ITEMS, default="AUTO",
+        description="Override the vertex format for this LOD (e.g. force "
+        "farther LODs of a rigged model to Weighted instead of Cinematic). "
+        "Auto = keep each mesh's own object setting")
+    decimate_ratio: FloatProperty(
+        name="Decimate Ratio", default=1.0, min=0.0, max=1.0,
+        description="Triangle ratio kept by the Decimate modifier "
+        "generating this LOD from LOD0 (1.0 = unmodified)")
+    camera_distance: FloatProperty(
+        name="Camera Distance", default=40.0,
+        description="Distance until which this LOD is displayed")
+    quality_level: IntProperty(
+        name="Quality Level", default=0, min=0, max=255,
+        description="Lowest graphics quality level at which this LOD is "
+        "active (0 = visible on all settings)")
+
+
 class RMV2CollectionSettings(bpy.types.PropertyGroup):
     is_rmv2_root: BoolProperty(
         name="RMV2 Root", default=False,
@@ -196,6 +218,33 @@ class RMV2CollectionSettings(bpy.types.PropertyGroup):
         name="Quality Level", default=0, min=0, max=255,
         description="Lowest graphics quality level at which this LOD is "
         "active (0 = visible on all settings)")
+    lod_overrides: CollectionProperty(type=RMV2LodOverride)
+    active_lod_override_index: IntProperty(default=0)
+
+
+class RMV2ArmatureSettings(bpy.types.PropertyGroup):
+    """.anim metadata for an armature, stored on the Armature data-block
+    (Object Data Properties tab) instead of raw custom properties so it
+    reads like the model/collection RMV2 panels rather than cluttering
+    the generic Custom Properties list."""
+    skeleton_name: StringProperty(
+        name="Skeleton", default="",
+        description="Skeleton name from the .anim header this armature "
+        "was built from (e.g. humanoid01, or 'building' for ad-hoc "
+        "animations). Animations imported onto this armature are checked "
+        "against this name")
+    anim_version: IntProperty(
+        name="Anim Version", default=7, min=0, max=8,
+        description="The .anim format version last imported/exported for "
+        "this armature; used as the export default")
+    anim_fps: FloatProperty(
+        name="Frame Rate", default=20.0, min=0.0,
+        description="Frame rate from the .anim header; used as the "
+        "export default")
+    flags: StringProperty(
+        name="Flags", default="",
+        description="Comma-separated v7+ animation flag strings (rare, "
+        "e.g. shake_camera), preserved for re-export")
 
 
 class RMV2AddonPreferences(bpy.types.AddonPreferences):
@@ -228,7 +277,9 @@ CLASSES = (
     RMV2TextureSlot,
     RMV2ObjectSettings,
     RMV2AttachPoint,
+    RMV2LodOverride,
     RMV2CollectionSettings,
+    RMV2ArmatureSettings,
     RMV2AddonPreferences,
 )
 
@@ -240,9 +291,12 @@ def register():
         type=RMV2ObjectSettings)
     bpy.types.Collection.rmv2 = bpy.props.PointerProperty(
         type=RMV2CollectionSettings)
+    bpy.types.Armature.rmv2 = bpy.props.PointerProperty(
+        type=RMV2ArmatureSettings)
 
 
 def unregister():
+    del bpy.types.Armature.rmv2
     del bpy.types.Collection.rmv2
     del bpy.types.Object.rmv2
     for cls in reversed(CLASSES):

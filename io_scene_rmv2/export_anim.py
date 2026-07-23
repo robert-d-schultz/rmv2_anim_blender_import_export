@@ -22,6 +22,7 @@ from __future__ import annotations
 import numpy as np
 
 import bpy
+from mathutils import Matrix
 
 from . import anim_format as af
 from . import skeleton
@@ -60,14 +61,26 @@ def _bone_table(arm_obj):
     return anim_bones, index_by_name
 
 
+def _unfix_matrix(local, bone):
+    """Undo the cosmetic per-bone rest-orientation fix build_armature
+    stamped on import (see skeleton.bone_fix_quaternion), turning a
+    Blender-space parent-relative matrix back into the file-space one.
+    A no-op for armatures without stored fixes (old files, hand-made
+    armatures)."""
+    fix_c = skeleton.bone_fix_quaternion(bone).to_matrix().to_4x4()
+    fix_p = (skeleton.bone_fix_quaternion(bone.parent).to_matrix().to_4x4()
+            if bone.parent is not None else Matrix.Identity(4))
+    return fix_p @ local @ fix_c.inverted()
+
+
 def _rest_local_matrices(arm_obj, pairs):
     out = []
     for _, bone in pairs:
         if bone.parent is not None:
-            out.append(bone.parent.matrix_local.inverted()
-                       @ bone.matrix_local)
+            local = bone.parent.matrix_local.inverted() @ bone.matrix_local
         else:
-            out.append(bone.matrix_local.copy())
+            local = bone.matrix_local.copy()
+        out.append(_unfix_matrix(local, bone))
     return out
 
 
@@ -82,6 +95,7 @@ def _sample_pose(arm_obj, pairs):
             local = pb.parent.matrix.inverted() @ pb.matrix
         else:
             local = pb.matrix.copy()
+        local = _unfix_matrix(local, bone)
         loc, quat, _scale = local.decompose()
         locs.append(loc)
         quats.append(quat)
@@ -99,17 +113,17 @@ def export_file(context, filepath: str, options: dict):
     mode = options.get("mode", "ANIMATION")
     scale = options.get("global_scale", 1.0)
 
-    arm_data = arm_obj.data
+    arm_settings = arm_obj.data.rmv2
     skeleton_name = options.get("skeleton_name") \
-        or arm_data.get(skeleton.SKELETON_NAME_PROP, "") \
+        or arm_settings.skeleton_name \
         or arm_obj.name
-    stored_flags = arm_data.get(skeleton.ANIM_FLAGS_PROP)
-    flags = [str(f) for f in stored_flags] \
-        if stored_flags and version > 6 else []
+    stored_flags = [f.strip() for f in arm_settings.flags.split(",")
+                    if f.strip()]
+    flags = stored_flags if version > 6 else []
 
     scene = context.scene
     frame_rate = float(options.get("frame_rate", 0.0)) \
-        or float(arm_data.get(skeleton.ANIM_FPS_PROP, 0.0)) \
+        or arm_settings.anim_fps \
         or scene.render.fps / scene.render.fps_base
 
     pairs = skeleton.bone_index_pairs(arm_obj)

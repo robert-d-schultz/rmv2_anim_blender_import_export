@@ -15,6 +15,7 @@ Pipeline per mesh object:
 from __future__ import annotations
 
 import json
+import os
 import re
 
 import bpy
@@ -88,6 +89,69 @@ def default_camera_distance(index: int) -> float:
     return float(20 * (2 ** index))
 
 
+def default_lod_overrides(root_collection, rigged: bool):
+    """Replace root_collection's auto-LOD override rows (see
+    properties.RMV2LodOverride) with 4 rows of sane defaults: halving
+    decimate ratios, and Weighted4/Weighted4/Weighted2/Weighted2 if
+    `rigged` (farther LODs of a rigged model usually want fewer bone
+    influences) else Static for all four - an explicit override, not
+    Auto: an unrigged model's LODs should stay static regardless of
+    what any individual mesh's own object-level setting happens to be.
+    Used both right after RMV2 import (import_rmv2.import_file) and by
+    the "reset to defaults" button."""
+    s = root_collection.rmv2
+    s.lod_overrides.clear()
+    formats = (["CINEMATIC", "CINEMATIC", "WEIGHTED", "WEIGHTED"] if rigged
+              else ["STATIC"] * 4)
+    for level in range(4):
+        entry = s.lod_overrides.add()
+        entry.vertex_format = formats[level]
+        entry.decimate_ratio = 1.0 if level == 0 else 0.5 ** level
+        entry.camera_distance = default_camera_distance(level)
+        entry.quality_level = max(0, level - 1)
+
+
+def _lods_for_root(root):
+    """[ (lod_info, [objects]) ] for an explicit root collection, using its
+    LOD sub-collections if present, else its mesh objects as a single LOD."""
+    children = _lod_children(root)
+    if not children:
+        return [({"level": 0, "camera_distance": default_camera_distance(0),
+                  "quality_level": 0}, _mesh_objects(root))]
+    lods = []
+    for i, col in enumerate(children):
+        s = col.rmv2
+        info = {
+            "level": s.lod_level if s.is_lod else i,
+            "camera_distance": (s.camera_distance if s.is_lod
+                                else default_camera_distance(i)),
+            "quality_level": s.quality_level if s.is_lod else 0,
+        }
+        lods.append((info, [o for o in col.objects if o.type == "MESH"]))
+    return lods
+
+
+def find_rmv2_roots(context):
+    """Every collection flagged as an RMV2 root, reachable from the scene's
+    collection hierarchy (used by batch export)."""
+    scene = context.scene
+    seen = set()
+    roots = []
+    stack = [scene.collection]
+    while stack:
+        col = stack.pop()
+        for child in col.children:
+            if child.name in seen:
+                continue
+            seen.add(child.name)
+            if child.rmv2.is_rmv2_root:
+                roots.append(child)
+            else:
+                stack.append(child)
+    roots.sort(key=lambda c: c.name)
+    return roots
+
+
 def gather_lods(context, options):
     """Returns (root_collection_or_None, [ (lod_info, [objects]) ])."""
     source = options.get("source", "AUTO")
@@ -108,20 +172,7 @@ def gather_lods(context, options):
 
     lods = []
     if source in ("AUTO", "COLLECTION") and root is not None:
-        children = _lod_children(root)
-        if children:
-            for i, col in enumerate(children):
-                s = col.rmv2
-                info = {
-                    "level": s.lod_level if s.is_lod else i,
-                    "camera_distance": (s.camera_distance if s.is_lod
-                                        else default_camera_distance(i)),
-                    "quality_level": s.quality_level if s.is_lod else 0,
-                }
-                lods.append((info, [o for o in col.objects
-                                    if o.type == "MESH"]))
-        else:
-            lods.append((None, _mesh_objects(root)))
+        lods = _lods_for_root(root)
     if not lods:
         if source == "VISIBLE":
             objs = [o for o in context.visible_objects if o.type == "MESH"]
@@ -140,19 +191,35 @@ def gather_lods(context, options):
     return root, lods
 
 
-def expand_auto_lods(lods, count: int):
-    """Turn a single LOD into `count` LODs; LOD i>0 tags its objects with
-    a decimate ratio of 0.5^i (applied at mesh extraction time)."""
-    info0, objs = lods[0]
+def expand_auto_lods(lods, count: int, overrides=None):
+    """Turn the best (lowest-level) LOD's meshes into several LODs, LOD i>0
+    tagged with a decimate ratio (default 0.5^i) applied at mesh extraction
+    time. LOD0's ratio is always 1.0 (the unmodified source mesh)
+    regardless of what a row below stores.
+
+    `overrides` is the RMV2 root collection's `lod_overrides` list (see
+    properties.RMV2LodOverride), one row per LOD level including LOD0; when
+    non-empty its row count decides how many LODs are generated (replacing
+    `count`) and each row's vertex_format/decimate_ratio/camera_distance
+    /quality_level replace the defaults for that LOD."""
+    _, objs = lods[0]
+    rows = list(overrides) if overrides else []
+    n = len(rows) if rows else count
     out = []
-    for i in range(count):
-        info = dict(info0) if i == 0 else {
+    for i in range(n):
+        row = rows[i] if rows else None
+        info = {
             "level": i,
-            "camera_distance": default_camera_distance(i),
-            "quality_level": 0,
+            "camera_distance": (row.camera_distance if row
+                                else default_camera_distance(i)),
+            "quality_level": row.quality_level if row else 0,
+            "decimate_ratio": (1.0 if i == 0
+                              else (row.decimate_ratio if row
+                                    else 0.5 ** i)),
+            "vertex_format_override": (
+                row.vertex_format if row and row.vertex_format != "AUTO"
+                else None),
         }
-        info["level"] = i
-        info["decimate_ratio"] = 0.5 ** i
         out.append((info, objs))
     return out
 
@@ -482,8 +549,9 @@ def extract_mesh_arrays(context, obj, options, warnings,
 # Model building
 # ---------------------------------------------------------------------------
 
-def _resolve_vertex_format(settings, bone_map, me, warnings, obj_name):
-    choice = settings.vertex_format
+def _resolve_vertex_format(settings, bone_map, me, warnings, obj_name,
+                           format_override=None):
+    choice = format_override or settings.vertex_format
     if choice != "AUTO":
         fmt = VERTEX_FORMAT_TO_INT[choice]
         if fmt != rf.VF_STATIC and not bone_map:
@@ -568,7 +636,8 @@ def _material_from_settings(obj, settings, fmt: int, scale: float,
 
 
 def build_model(context, obj, options, attach_points, attach_names,
-                warnings, decimate_ratio=1.0) -> rf.RmvModel | None:
+                warnings, decimate_ratio=1.0,
+                vertex_format_override=None) -> rf.RmvModel | None:
     settings = obj.rmv2
     scale = options.get("global_scale", 1.0)
 
@@ -581,7 +650,7 @@ def build_model(context, obj, options, attach_points, attach_names,
         me = arrays["mesh_for_weights"]
         bone_map = resolve_bone_map(obj, attach_names, warnings)
         fmt = _resolve_vertex_format(settings, bone_map, me, warnings,
-                                     obj.name)
+                                     obj.name, vertex_format_override)
         k = {rf.VF_WEIGHTED: 2, rf.VF_CINEMATIC: 4}.get(fmt, 0)
 
         if k:
@@ -709,23 +778,58 @@ def _decode_dirs(b: np.ndarray) -> np.ndarray:
 
 def export_file(context, filepath: str, options: dict):
     """Export to filepath. Returns (stats, warnings). Raises ExportError."""
-    warnings: list[str] = []
-
     root, lods = gather_lods(context, options)
     total_objects = sum(len(objs) for _, objs in lods)
     if total_objects == 0:
         raise ExportError(
             "Nothing to export: no mesh objects found in the active "
             "collection / selection")
+    return _export_lods(context, root, lods, filepath, options)
+
+
+def export_batch(context, directory: str, options: dict):
+    """Export every RMV2 root collection in the scene into `directory`, one
+    file per collection named after it. Returns (results, warnings) where
+    results is [(collection_name, stats_or_None, warnings)]; a None stats
+    means that collection was skipped (reported in its warnings)."""
+    roots = find_rmv2_roots(context)
+    if not roots:
+        raise ExportError(
+            "No RMV2 root collections found in the scene to batch export")
+
+    os.makedirs(directory, exist_ok=True)
+    batch_options = dict(options, skeleton_name="")
+    results = []
+    for root in roots:
+        lods = _lods_for_root(root)
+        if sum(len(objs) for _, objs in lods) == 0:
+            results.append(
+                (root.name, None, [f"{root.name}: skipped, no mesh objects"]))
+            continue
+        filepath = os.path.join(directory, root.name + ".rigid_model_v2")
+        try:
+            stats, warnings = _export_lods(
+                context, root, lods, filepath, batch_options)
+        except ExportError as exc:
+            results.append((root.name, None, [f"{root.name}: {exc}"]))
+            continue
+        results.append((root.name, stats, warnings))
+    return results
+
+
+def _export_lods(context, root, lods, filepath: str, options: dict):
+    """Shared tail of export_file/export_batch once (root, lods) are known.
+    Returns (stats, warnings). Raises ExportError."""
+    warnings: list[str] = []
 
     if options.get("auto_lods", False):
-        if len(lods) == 1:
-            lods = expand_auto_lods(lods,
-                                    max(2, options.get("auto_lod_count", 4)))
-        else:
-            warnings.append(
-                f"Generate LODs ignored: the source already has "
-                f"{len(lods)} LODs")
+        # Ignore any manually set-up LOD collections beyond the best
+        # (lowest-level) one and regenerate the whole ladder from it, using
+        # the root collection's auto-LOD override rows if it has any.
+        best = min(lods, key=lambda item: item[0]["level"])
+        overrides = root.rmv2.lod_overrides if root is not None else None
+        lods = expand_auto_lods(
+            [best], max(2, options.get("auto_lod_count", 4)), overrides)
 
     version = int(options.get("version", "7"))
     skeleton = options.get("skeleton_name", "")
@@ -749,13 +853,15 @@ def export_file(context, filepath: str, options: dict):
             quality_level=info["quality_level"],
         )
         ratio = info.get("decimate_ratio", 1.0)
+        fmt_override = info.get("vertex_format_override")
         for obj in objs:
-            cache_key = (obj.name, ratio)
+            cache_key = (obj.name, ratio, fmt_override)
             if cache_key in built_cache:
                 model = built_cache[cache_key]
             else:
                 model = build_model(context, obj, options, attach_points,
-                                    attach_names, warnings, ratio)
+                                    attach_names, warnings, ratio,
+                                    fmt_override)
                 built_cache[cache_key] = model
             if model is None:
                 continue

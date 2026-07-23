@@ -131,7 +131,7 @@ class AnimFile:
 
     @property
     def frame_count(self) -> int:
-        return len(self.parts[0].dynamic_frames) if self.parts else 0
+        return sum(len(p.dynamic_frames) for p in self.parts)
 
 
 @dataclass
@@ -446,6 +446,37 @@ def resolve(anim: AnimFile, part_index: int = 0) -> ResolvedAnim:
             static_r[bone] = True
             rotations[:, bone] = static.rotations[rmap.index]
 
+    return ResolvedAnim(translations=translations, rotations=rotations,
+                        has_translation=has_t, has_rotation=has_r,
+                        static_translation=static_t,
+                        static_rotation=static_r)
+
+
+def resolve_all(anim: AnimFile) -> ResolvedAnim:
+    """Expand every part into one continuous set of dense per-bone tracks.
+
+    Multi-part files only occur in version 8 (see _load_parts_v8); the
+    game does not treat parts as alternates or layers, it plays them back
+    to back (AnimationClip's constructor in AssetEditor simply
+    concatenates every part's frames in order), so that's what this does.
+    has_translation/has_rotation are OR'd across parts (a bone counts as
+    animated if any part animates it); static_translation/static_rotation
+    are recomputed from the concatenated frames rather than trusted from
+    individual parts, since a bone can be static within a part but change
+    value between parts.
+    """
+    if len(anim.parts) == 1:
+        return resolve(anim, 0)
+
+    resolved_parts = [resolve(anim, i) for i in range(len(anim.parts))]
+    translations = np.concatenate([r.translations for r in resolved_parts],
+                                  axis=0)
+    rotations = np.concatenate([r.rotations for r in resolved_parts], axis=0)
+    has_t = np.any([r.has_translation for r in resolved_parts], axis=0)
+    has_r = np.any([r.has_rotation for r in resolved_parts], axis=0)
+    static_t = np.all(np.isclose(translations, translations[:1]),
+                      axis=(0, 2))
+    static_r = np.all(np.isclose(rotations, rotations[:1]), axis=(0, 2))
     return ResolvedAnim(translations=translations, rotations=rotations,
                         has_translation=has_t, has_rotation=has_r,
                         static_translation=static_t,

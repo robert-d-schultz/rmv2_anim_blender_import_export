@@ -3,6 +3,8 @@ slot list, and small workflow operators."""
 
 from __future__ import annotations
 
+import re
+
 import bpy
 from bpy.props import IntProperty
 
@@ -82,6 +84,90 @@ class RMV2_OT_attach_remove(bpy.types.Operator):
         index = min(s.active_attach_index, len(s.attach_points) - 1)
         s.attach_points.remove(index)
         s.active_attach_index = max(0, index - 1)
+        return {"FINISHED"}
+
+
+class RMV2_OT_lod_override_add(bpy.types.Operator):
+    bl_idname = "rmv2.lod_override_add"
+    bl_label = "Add LOD Override"
+    bl_description = ("Add a row to the active collection's auto-LOD "
+                      "override list (used by Export > Generate LODs)")
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        return context.collection is not None
+
+    def execute(self, context):
+        from .export_rmv2 import default_camera_distance
+        s = context.collection.rmv2
+        entry = s.lod_overrides.add()
+        level = len(s.lod_overrides) - 1    # row index == LOD level
+        entry.decimate_ratio = 1.0 if level == 0 else 0.5 ** level
+        entry.camera_distance = default_camera_distance(level)
+        s.active_lod_override_index = level
+        return {"FINISHED"}
+
+
+class RMV2_OT_lod_override_remove(bpy.types.Operator):
+    bl_idname = "rmv2.lod_override_remove"
+    bl_label = "Remove LOD Override"
+    bl_description = "Remove the selected auto-LOD override row"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        return (context.collection is not None
+                and len(context.collection.rmv2.lod_overrides) > 0)
+
+    def execute(self, context):
+        s = context.collection.rmv2
+        index = min(s.active_lod_override_index, len(s.lod_overrides) - 1)
+        s.lod_overrides.remove(index)
+        s.active_lod_override_index = max(0, index - 1)
+        return {"FINISHED"}
+
+
+def _collection_is_rigged(collection) -> bool:
+    """Best-effort guess for the default-fill below: does any mesh in this
+    collection (recursively, LODs included) look bone-weighted - an
+    armature modifier/parent, or a bone_<i>-style vertex group."""
+    bone_group = re.compile(r"^(bn_|bone_\d+$)")
+    for obj in collection.all_objects:
+        if obj.type != "MESH":
+            continue
+        for mod in obj.modifiers:
+            if mod.type == "ARMATURE" and mod.object is not None:
+                return True
+        if obj.parent is not None and obj.parent.type == "ARMATURE":
+            return True
+        if any(bone_group.match(g.name) for g in obj.vertex_groups):
+            return True
+    return False
+
+
+class RMV2_OT_lod_overrides_set_defaults(bpy.types.Operator):
+    bl_idname = "rmv2.lod_overrides_set_defaults"
+    bl_label = "Reset Auto-LOD Overrides to Defaults"
+    bl_description = ("RMV2 import already sets this up automatically - "
+                      "use this to put the 4 default rows back (halving "
+                      "decimate ratios; Weighted4 for the first two and "
+                      "Weighted2 for the last two if the collection looks "
+                      "rigged, Static otherwise) after changing them")
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        return context.collection is not None
+
+    def execute(self, context):
+        from .export_rmv2 import default_lod_overrides
+        rigged = _collection_is_rigged(context.collection)
+        default_lod_overrides(context.collection, rigged)
+        context.collection.rmv2.active_lod_override_index = 0
+        self.report(
+            {"INFO"},
+            f"Reset to 4 default LOD overrides ({'rigged' if rigged else 'static'})")
         return {"FINISHED"}
 
 
@@ -185,6 +271,17 @@ class RMV2_UL_attach_points(bpy.types.UIList):
         sub.prop(item, "bone_index", text="")
 
 
+class RMV2_UL_lod_overrides(bpy.types.UIList):
+    def draw_item(self, context, layout, data, item, icon, active_data,
+                  active_propname, index):
+        row = layout.row(align=True)
+        row.label(text=f"LOD{index}")
+        row.prop(item, "vertex_format", text="")
+        row.prop(item, "decimate_ratio", text="")
+        row.prop(item, "camera_distance", text="")
+        row.prop(item, "quality_level", text="")
+
+
 class OBJECT_PT_rmv2(bpy.types.Panel):
     bl_label = "RMV2 (RigidModel)"
     bl_space_type = "PROPERTIES"
@@ -268,6 +365,25 @@ class COLLECTION_PT_rmv2(bpy.types.Panel):
                 for i in range(12):
                     grid.prop(entry, "matrix", index=i, text="")
 
+            lod_box = layout.box()
+            lod_box.label(
+                text=f"Auto-LOD Overrides ({len(s.lod_overrides)})",
+                icon="MOD_DECIM")
+            lod_box.label(
+                text="Used by Export > Generate LODs; empty = default "
+                "halving decimate", icon="INFO")
+            row = lod_box.row()
+            row.template_list("RMV2_UL_lod_overrides", "", s,
+                              "lod_overrides", s,
+                              "active_lod_override_index", rows=3)
+            button_col = row.column(align=True)
+            button_col.operator("rmv2.lod_override_add", icon="ADD",
+                                text="")
+            button_col.operator("rmv2.lod_override_remove", icon="REMOVE",
+                                text="")
+            lod_box.operator("rmv2.lod_overrides_set_defaults",
+                             icon="FILE_REFRESH")
+
         layout.separator()
         layout.prop(s, "is_lod")
         if s.is_lod:
@@ -276,17 +392,45 @@ class COLLECTION_PT_rmv2(bpy.types.Panel):
             layout.prop(s, "quality_level")
 
 
+class ARMATURE_PT_rmv2(bpy.types.Panel):
+    bl_label = "RMV2 (.anim)"
+    bl_space_type = "PROPERTIES"
+    bl_region_type = "WINDOW"
+    bl_context = "data"
+
+    @classmethod
+    def poll(cls, context):
+        return (context.object is not None
+                and context.object.type == "ARMATURE")
+
+    def draw(self, context):
+        layout = self.layout
+        s = context.object.data.rmv2
+        layout.use_property_split = True
+        layout.use_property_decorate = False
+
+        layout.prop(s, "skeleton_name")
+        layout.prop(s, "anim_version")
+        layout.prop(s, "anim_fps")
+        layout.prop(s, "flags")
+
+
 CLASSES = (
     RMV2_OT_texture_add,
     RMV2_OT_texture_remove,
     RMV2_OT_attach_add,
     RMV2_OT_attach_remove,
+    RMV2_OT_lod_override_add,
+    RMV2_OT_lod_override_remove,
+    RMV2_OT_lod_overrides_set_defaults,
     RMV2_OT_copy_settings,
     RMV2_OT_setup_lods,
     RMV2_UL_textures,
     RMV2_UL_attach_points,
+    RMV2_UL_lod_overrides,
     OBJECT_PT_rmv2,
     COLLECTION_PT_rmv2,
+    ARMATURE_PT_rmv2,
 )
 
 

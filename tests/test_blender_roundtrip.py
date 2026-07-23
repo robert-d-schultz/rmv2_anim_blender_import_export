@@ -419,8 +419,9 @@ def auto_lod_case(tmpdir):
     check(len(sphere.modifiers) == 0,
           "temporary decimate modifiers cleaned up")
 
-    # asking for auto LODs when the source already has LOD collections
-    # only warns
+    # asking for auto LODs when the source already has manually set-up LOD
+    # collections discards all but the best (lowest-level) one and
+    # regenerates the whole ladder from it
     reset_scene()
     src = os.path.join(tmpdir, "auto_lod_src.rigid_model_v2")
     with open(src, "wb") as handle:
@@ -434,9 +435,9 @@ def auto_lod_case(tmpdir):
         "auto_lods": True, "auto_lod_count": 4,
         "apply_modifiers": True, "high_precision": False,
         "write_attach_points": True, "global_scale": 1.0})
-    check(stats["lods"] == 2 and any("Generate LODs ignored" in w
-                                     for w in warnings),
-          "auto LODs skipped with a warning for multi-LOD sources")
+    check(stats["lods"] == 4,
+          f"auto LODs regenerated from the best LOD, ignoring the "
+          f"source's own manually set-up LODs ({stats['lods']})")
 
 
 def skinned_native_case(tmpdir):
@@ -776,6 +777,46 @@ BIND_T = [(0.0, 1.0, 0.0), (0.0, 0.5, 0.0),
 BIND_R = [(0.0, 0.0, 0.0, 1.0), (_SQ2, 0.0, 0.0, _SQ2),
           (0.0, 0.0, 0.0, 1.0), (0.0, _SQ2, 0.0, _SQ2)]
 
+# 5-bone chain for the "majority descendant child" orientation rule: 'a'
+# has two children, 'b' (which itself has a child 'd', so owns 2 of a's 3
+# descendants) and 'c' (a leaf, 1 of 3) - 'b' is the clear majority, in a
+# direction ('a' offset (1,0,0)) distinct from 'c' ((-1,0,0)) so aiming at
+# the wrong one/the midpoint is easy to tell apart from aiming at 'b'.
+MAJORITY_BONES = [af.AnimBone("root", -1), af.AnimBone("a", 0),
+                  af.AnimBone("b", 1), af.AnimBone("c", 1),
+                  af.AnimBone("d", 2)]
+MAJORITY_T = [(0.0, 0.0, 0.0), (0.0, 1.0, 0.0), (1.0, 0.0, 0.0),
+             (-1.0, 0.0, 0.0), (0.0, 1.0, 0.0)]
+MAJORITY_R = [(0.0, 0.0, 0.0, 1.0)] * 5
+
+
+def make_majority_skeleton_anim():
+    return af.build_simple(
+        7, "majority_test", 20.0, MAJORITY_BONES,
+        np.array([MAJORITY_T, MAJORITY_T], np.float32),
+        np.array([MAJORITY_R, MAJORITY_R], np.float32))
+
+
+# Regression case for a real bug found in
+# C:\Users\rob\Desktop\animations\skeletons\steamtank01.anim: axel_front_0
+# has two leaf children, wheel_left_0/wheel_right_0, whose local offsets
+# are near-exact opposites (checked against the real file: they sum to
+# ~8.5e-6) - so their midpoint lands right back on axel_front_0's own
+# head, a ~zero-length "aim at the children" direction.
+STEAMTANK_BONES = [af.AnimBone("root", -1), af.AnimBone("axel_front_0", 0),
+                   af.AnimBone("wheel_left_0", 1),
+                   af.AnimBone("wheel_right_0", 1)]
+STEAMTANK_T = [(0.0, 0.0, 0.0), (0.0, 1.0, 0.0),
+              (0.0, 0.0, -1.0), (0.0, 0.0, 1.0)]
+STEAMTANK_R = [(0.0, 0.0, 0.0, 1.0)] * 4
+
+
+def make_steamtank_skeleton_anim():
+    return af.build_simple(
+        7, "steamtank01", 20.0, STEAMTANK_BONES,
+        np.array([STEAMTANK_T, STEAMTANK_T], np.float32),
+        np.array([STEAMTANK_R, STEAMTANK_R], np.float32))
+
 
 def make_skeleton_anim():
     # Real bind-pose skeleton files carry 2-3 identical frames - they are
@@ -786,7 +827,7 @@ def make_skeleton_anim():
         np.array([BIND_R, BIND_R], np.float32))
 
 
-def make_animation_anim(frames=4):
+def make_animation_anim(frames=4, skeleton_name="humanoid01"):
     translations = np.zeros((frames, 4, 3), np.float32)
     rotations = np.zeros((frames, 4, 4), np.float32)
     for f in range(frames):
@@ -799,7 +840,7 @@ def make_animation_anim(frames=4):
             base = Quaternion((BIND_R[b][3], *BIND_R[b][:3]))
             q = base @ extra
             rotations[f, b] = (q.x, q.y, q.z, q.w)
-    return af.build_simple(7, "humanoid01", 20.0, ANIM_BONES,
+    return af.build_simple(7, skeleton_name, 20.0, ANIM_BONES,
                            translations, rotations,
                            flags=["shake_camera"])
 
@@ -885,7 +926,7 @@ def anim_skeleton_case(tmpdir):
     check(arm_obj.animation_data is None
           or arm_obj.animation_data.action is None,
           "no action keyed for a skeleton by default")
-    check(arm_obj.data[rmv2_skeleton.SKELETON_NAME_PROP] == "humanoid01",
+    check(arm_obj.data.rmv2.skeleton_name == "humanoid01",
           "skeleton name stored on the armature")
     check(arm_obj.data.bones["spine_0"].parent.name == "root",
           "parenting follows the file")
@@ -902,7 +943,100 @@ def anim_skeleton_case(tmpdir):
         check(err < 1e-5,
               f"bone '{bone.name}' rest head matches game-space FK "
               f"(err {err:.6f})")
+
+    # spine_0's two children (spine_1, arm_left) are both leaves - neither
+    # owns a majority of the other's descendants (1 of 2 each, a tie) - so
+    # building the armature should aim spine_0's tail at their midpoint,
+    # not favor either one, and still stamp a non-identity visual fix
+    # since that midpoint isn't along spine_0's raw file-space Y axis.
+    spine0 = arm_obj.data.bones["spine_0"]
+    check(rmv2_skeleton.BONE_FIX_QUAT_PROP in spine0,
+          "off-axis children triggered a visual orientation fix")
+    tail_world = (arm_obj.matrix_world
+                 @ Matrix.Translation(spine0.tail_local)).translation
+    midpoint = (expected[2] + expected[3]) / 2    # spine_1, arm_left heads
+    tail_err = (tail_world - midpoint).length
+    check(tail_err < 1e-4,
+          f"spine_0's tail visually reaches the midpoint of its two tied "
+          f"children (err {tail_err:.6f})")
+
+    # arm_left is a leaf whose length should be 55% of its parent spine_0's.
+    arm_left = arm_obj.data.bones["arm_left"]
+    length_ratio = arm_left.length / spine0.length
+    check(abs(length_ratio - 0.55) < 1e-4,
+          f"leaf bone length is 55% of its parent's ({length_ratio:.4f})")
     return arm_obj
+
+
+def bone_orientation_majority_case(tmpdir):
+    """'a' has two children: 'b' (which owns a further child 'd', so 2 of
+    a's 3 descendants) and 'c' (a leaf, 1 of 3). 'b' is a clear majority
+    (2 > 3/2), so 'a' must aim exactly at 'b', not 'c' and not their
+    midpoint."""
+    print("\n=== Bone orientation: majority-descendant child ===")
+    reset_scene()
+    anim = make_majority_skeleton_anim()
+    path = write_anim(tmpdir, "majority.anim", anim)
+    arm_obj, _, warnings = import_anim.import_file(
+        bpy.context, path, {"mode": "SKELETON"})
+    print("  warnings:", warnings or "none")
+    bpy.context.view_layer.update()
+
+    expected = game_world_positions(anim, 0)
+    a_bone = arm_obj.data.bones["a"]
+    tail_world = (arm_obj.matrix_world
+                 @ Matrix.Translation(a_bone.tail_local)).translation
+    b_head, c_head = expected[2], expected[3]
+    err_to_b = (tail_world - b_head).length
+    err_to_c = (tail_world - c_head).length
+    midpoint_err = (tail_world - (b_head + c_head) / 2).length
+    check(err_to_b < 1e-4,
+          f"'a' aims exactly at its majority-descendant child 'b' "
+          f"(err {err_to_b:.6f})")
+    check(err_to_c > 1e-3 and midpoint_err > 1e-3,
+          "and clearly not at the minority child 'c' or the midpoint "
+          f"(err to c {err_to_c:.6f}, err to midpoint {midpoint_err:.6f})")
+
+
+def bone_orientation_symmetric_children_case(tmpdir):
+    """Regression test for a real bug found in
+    C:\\Users\\rob\\Desktop\\animations\\skeletons\\steamtank01.anim:
+    axel_front_0's two leaf children sit almost exactly opposite each
+    other, so the "aim at the midpoint of the children" direction has
+    ~zero length - which used to leave the bone at its raw, unfixed file
+    rotation (the original ~90-degree-off bug), and in this real file
+    that raw rotation happened to point straight at wheel_left_0's
+    general direction and away from wheel_right_0's. It must instead
+    fall back to continuing the parent's incoming direction, same as a
+    leaf bone would."""
+    print("\n=== Bone orientation: symmetric children (steamtank01.anim) ===")
+    reset_scene()
+    anim = make_steamtank_skeleton_anim()
+    path = write_anim(tmpdir, "steamtank_skel.anim", anim)
+    arm_obj, _, warnings = import_anim.import_file(
+        bpy.context, path, {"mode": "SKELETON"})
+    print("  warnings:", warnings or "none")
+    bpy.context.view_layer.update()
+
+    expected = game_world_positions(anim, 0)
+    root_head, axel_head, left_head, right_head = expected
+    axel = arm_obj.data.bones["axel_front_0"]
+    tail_world = (arm_obj.matrix_world
+                 @ Matrix.Translation(axel.tail_local)).translation
+
+    to_tail = (tail_world - axel_head).normalized()
+    parent_dir = (axel_head - root_head).normalized()
+    left_dir = (left_head - axel_head).normalized()
+    right_dir = (right_head - axel_head).normalized()
+    dot_parent = to_tail.dot(parent_dir)
+    dot_left = to_tail.dot(left_dir)
+    dot_right = to_tail.dot(right_dir)
+    check(dot_parent > 0.999,
+          f"axel_front_0 continues the parent's incoming direction, not "
+          f"the raw file rotation (dot with parent dir {dot_parent:.6f})")
+    check(abs(dot_left) < 0.01 and abs(dot_right) < 0.01,
+          f"and points at neither wheel (dot left {dot_left:.6f}, "
+          f"dot right {dot_right:.6f})")
 
 
 def anim_flow1_case(tmpdir):
@@ -1186,11 +1320,328 @@ def anim_mode_gating_case(tmpdir):
               "animation import without armature raises")
 
 
+def anim_auto_detect_case(tmpdir):
+    """No explicit mode: intent is inferred purely from the file (the
+    'building' skeleton name, or whether the frames look like a bind pose
+    - see import_anim._looks_like_bindpose), never from whatever armature
+    happens to be selected/active. Also covers the skeleton-name mismatch
+    guard and the 'building' ad-hoc naming/one-shot-keying behavior."""
+    print("\n=== .anim import auto-detection ===")
+
+    # No armature yet, real (non-repeating) frames, 'building' skeleton
+    # name -> ad-hoc animations for buildings/props never ship a separate
+    # bind-pose skeleton file, so this must build a fresh armature AND key
+    # the frames immediately (no second, redundant import needed), named
+    # after the file itself (skeleton name "building" goes in the stored
+    # metadata instead).
+    reset_scene()
+    path = write_anim(tmpdir, "tower_idle.anim",
+                      make_animation_anim(frames=3, skeleton_name="building"))
+    arm_obj, stats, warnings = import_anim.import_file(bpy.context, path, {})
+    check(stats["created_armature"],
+          "'building'-named ad-hoc file builds a fresh armature with no "
+          "explicit mode, despite non-repeating frames")
+    check(len(arm_obj.data.bones) == 4, "ad-hoc armature has all 4 bones")
+    check(arm_obj.name == "tower_idle",
+          f"ad-hoc armature named after the file, not 'building' "
+          f"({arm_obj.name})")
+    check(arm_obj.data.rmv2.skeleton_name == "building",
+          "'building' stored in the skeleton-name metadata instead")
+    check(stats["keyed_bones"] > 0 and arm_obj.animation_data is not None
+          and arm_obj.animation_data.action is not None,
+          "ad-hoc file's frames keyed as an action in the same import, no "
+          "second import needed")
+
+    # No armature yet, a real (non-repeating, non-'building') animation ->
+    # neither heuristic matches, so this must raise instead of guessing.
+    reset_scene()
+    path = write_anim(tmpdir, "real_anim.anim", make_animation_anim(frames=3))
+    try:
+        import_anim.import_file(bpy.context, path, {})
+        check(False, "non-bindpose file with no armature and no explicit "
+              "mode raises")
+    except import_anim.AnimImportError as exc:
+        check("Import the model's skeleton first" in str(exc),
+              "non-bindpose file with no armature and no explicit mode "
+              "raises")
+
+    # (a) A bind-pose-shaped file with NO model/root context yet must be
+    # allowed to build a SECOND, independent armature even if the first
+    # one is still selected/active from a prior import - there is no
+    # specific target it could be conflicting with (a skeleton imported
+    # before any model exists yet must stay importable a second time,
+    # e.g. for a second model that hasn't been imported yet either).
+    reset_scene()
+    skel_path = write_anim(tmpdir, "auto_skel.anim", make_skeleton_anim())
+    arm_obj, _, _ = import_anim.import_file(
+        bpy.context, skel_path, {"mode": "SKELETON"})
+    check(arm_obj.select_get() and bpy.context.view_layer.objects.active
+          is arm_obj, "first skeleton import left its armature selected "
+          "and active (sets up the trap this test is checking)")
+    arm_obj2, stats2, _ = import_anim.import_file(bpy.context, skel_path, {})
+    check(stats2["created_armature"] and arm_obj2 is not arm_obj,
+          "re-importing the same skeleton with no model/root context yet "
+          "builds a second, independent armature instead of erroring")
+    check(len([o for o in bpy.data.objects if o.type == "ARMATURE"]) == 2,
+          "both armatures now exist side by side")
+
+    # (b) Once a root collection actually owns an armature (a real,
+    # model-level conflict - this was the "importing a second skeleton
+    # overwrites the first" bug), re-importing the same skeleton file for
+    # that SAME root must still raise.
+    reset_scene()
+    rmv_path = os.path.join(tmpdir, "auto_detect_model.rigid_model_v2")
+    with open(rmv_path, "wb") as handle:
+        handle.write(rf.save(make_file(7, rf.VF_CINEMATIC,
+                                       with_attach_points=False)))
+    root, _ = import_rmv2.import_file(bpy.context, rmv_path, {})
+    activate_collection(root.name)
+    arm_obj, _, _ = import_anim.import_file(
+        bpy.context, skel_path, {"mode": "SKELETON"})
+    check(arm_obj.name in {o.name for o in root.all_objects},
+          "skeleton import adopted the armature into the model's root "
+          "collection (sets up the real conflict this test checks)")
+    try:
+        import_anim.import_file(bpy.context, skel_path, {})
+        check(False, "re-importing the same skeleton for a root that "
+              "already owns an armature raises")
+    except import_anim.AnimImportError as exc:
+        check("already has an armature" in str(exc),
+              "re-importing the same skeleton for a root that already "
+              "owns an armature raises")
+    check(len([o for o in root.all_objects if o.type == "ARMATURE"]) == 1,
+          "no second armature was created inside the root")
+
+    # Skeleton-name mismatch: applying a real animation for a different
+    # skeleton onto an existing armature must raise, not silently key
+    # nonsense data onto the wrong bones.
+    other_anim_path = write_anim(
+        tmpdir, "other_skeleton.anim",
+        make_animation_anim(frames=3, skeleton_name="not_humanoid01"))
+    try:
+        import_anim.import_file(bpy.context, other_anim_path, {})
+        check(False, "mismatched skeleton name raises")
+    except import_anim.AnimImportError as exc:
+        check("humanoid01" in str(exc) and "not_humanoid01" in str(exc),
+              "mismatched skeleton name raises")
+
+
+def building_matrix_index_attach_case(tmpdir):
+    """Destructible-building pieces carry no bone weights of their own -
+    rigid meshes tagged with a matrix_index bone to follow instead. With a
+    'building' armature selected, importing a blank-skeleton RMV2 file
+    should rigidly constrain the mesh to that bone via a Child Of
+    constraint (no "Set Inverse" - the piece is meant to move TO the
+    bone, that's the point of matrix_index) - no vertex groups or
+    armature modifier either, since the mesh is genuinely unrigged (a
+    vertex group would misreport it as weighted for vertex-format/LOD
+    purposes, which is exactly what a prior version of this feature got
+    wrong)."""
+    print("\n=== Building matrix_index auto-attach ===")
+    reset_scene()
+
+    skel_anim = af.build_simple(
+        7, "building", 20.0,
+        [af.AnimBone("root", -1), af.AnimBone("piece1", 0)],
+        np.array([[[0.0, 0.0, 0.0], [0.0, 1.0, 0.0]]] * 2, np.float32),
+        np.array([[[0.0, 0.0, 0.0, 1.0]] * 2] * 2, np.float32))
+    skel_path = write_anim(tmpdir, "tower_skeleton.anim", skel_anim)
+    arm_obj, _, _ = import_anim.import_file(
+        bpy.context, skel_path, {"mode": "SKELETON"})
+    check(arm_obj.data.rmv2.skeleton_name == "building",
+          "'building' armature built")
+
+    rmv = rf.RmvFile(version=7, skeleton_name="")
+    mat = rf.WeightedMaterial(material_id=rf.MAT_DEFAULT,
+                              vertex_format=rf.VF_STATIC,
+                              model_name="piece1_mesh", matrix_index=1)
+    lod = rf.RmvLod(camera_distance=40.0, lod_level=0)
+    lod.models.append(rf.RmvModel(material=mat, mesh=make_cube_mesh(0)))
+    rmv.lods.append(lod)
+    rmv_path = os.path.join(tmpdir, "tower_piece.rigid_model_v2")
+    with open(rmv_path, "wb") as handle:
+        handle.write(rf.save(rmv))
+
+    root, stats = import_rmv2.import_file(bpy.context, rmv_path, {
+        "import_lods": "ALL", "build_materials": False,
+        "attach_armature": True, "global_scale": 1.0,
+    })
+    obj = next(o for o in root.all_objects if o.type == "MESH")
+    check(len(obj.vertex_groups) == 0,
+          "no vertex group synthesized - the mesh stays genuinely unrigged")
+    check(not any(mod.type == "ARMATURE" for mod in obj.modifiers),
+          "no armature modifier added (not deform-based)")
+    child_of = next((c for c in obj.constraints if c.type == "CHILD_OF"),
+                    None)
+    check(child_of is not None and child_of.target is arm_obj
+          and child_of.subtarget == "piece1",
+          "rigidly constrained to the matrix_index bone via Child Of")
+    bpy.context.view_layer.update()
+    piece1_world = game_world_positions(skel_anim, 0)[1]    # bone 'piece1'
+    pos_err = (obj.matrix_world.translation - piece1_world).length
+    check(pos_err < 1e-4,
+          f"the piece is actually moved to the matrix_index bone's "
+          f"position, not left where it was in the file (err {pos_err:.6f})")
+
+    check(root.rmv2.lod_overrides[0].vertex_format == "STATIC",
+          "auto-LOD defaults treat a building model as unrigged/Static, "
+          "not Auto or Weighted, despite an armature being attached")
+
+
+def auto_lod_override_case(tmpdir):
+    print("\n=== Auto-LOD per-row overrides ===")
+    reset_scene()
+    bpy.ops.mesh.primitive_uv_sphere_add(segments=16, ring_count=8)
+    sphere = bpy.context.active_object
+    bpy.ops.object.shade_smooth()
+    vg = sphere.vertex_groups.new(name="bone_0")
+    vg.add(list(range(len(sphere.data.vertices))), 1.0, "REPLACE")
+
+    root = bpy.data.collections.new("lod_override_root")
+    bpy.context.scene.collection.children.link(root)
+    root.rmv2.is_rmv2_root = True
+    root.objects.link(sphere)
+    bpy.context.scene.collection.objects.unlink(sphere)
+    activate_collection(root.name)
+
+    # "Set Default Auto-LOD Overrides" should detect the bone_0 vertex
+    # group as rigged and default to Weighted4 for the first two LODs,
+    # Weighted2 for the last two.
+    result_op = bpy.ops.rmv2.lod_overrides_set_defaults()
+    check(result_op == {"FINISHED"}, "set-defaults operator finished")
+    defaults = root.rmv2.lod_overrides
+    check(len(defaults) == 4, f"4 default rows created ({len(defaults)})")
+    check([r.vertex_format for r in defaults]
+          == ["CINEMATIC", "CINEMATIC", "WEIGHTED", "WEIGHTED"],
+          "rigged collection defaults to Weighted4/Weighted4/Weighted2"
+          "/Weighted2")
+    check(defaults[0].decimate_ratio == 1.0,
+          "LOD0's default ratio is still 1.0 (unmodified)")
+
+    # Now set up a specific 3-row (LOD0/1/2) override for the rest of the
+    # test, row index == LOD level.
+    root.rmv2.lod_overrides.clear()
+    row0 = root.rmv2.lod_overrides.add()
+    row0.vertex_format = "AUTO"
+    row0.camera_distance = 20.0
+    row1 = root.rmv2.lod_overrides.add()
+    row1.vertex_format = "AUTO"
+    row1.decimate_ratio = 0.6
+    row1.camera_distance = 30.0
+    row1.quality_level = 1
+    row2 = root.rmv2.lod_overrides.add()
+    row2.vertex_format = "WEIGHTED"
+    row2.decimate_ratio = 0.2
+    row2.camera_distance = 90.0
+    row2.quality_level = 2
+
+    path = os.path.join(tmpdir, "auto_lod_override.rigid_model_v2")
+    bpy.context.view_layer.objects.active = sphere
+    sphere.select_set(True)
+    stats, warnings = export_rmv2.export_file(bpy.context, path, {
+        "source": "SELECTED",
+        "version": "7",
+        "skeleton_name": "",
+        "auto_lods": True,
+        "auto_lod_count": 4,    # ignored: override rows win
+        "apply_modifiers": True,
+        "high_precision": False,
+        "write_attach_points": False,
+        "global_scale": 1.0,
+    })
+    print("  export warnings:", warnings or "none")
+    check(stats["lods"] == 3,
+          f"override row count decides LOD count, ignoring auto_lod_count "
+          f"({stats['lods']})")
+
+    with open(path, "rb") as handle:
+        result = rf.load(handle.read())
+    check([round(lod.camera_distance) for lod in result.lods]
+          == [20, 30, 90], "per-row camera distances used (LOD0 default)")
+    check([lod.quality_level for lod in result.lods] == [0, 1, 2],
+          "per-row quality levels used")
+    formats = [lod.models[0].material.vertex_format for lod in result.lods]
+    check(formats[0] == rf.VF_CINEMATIC and formats[1] == rf.VF_CINEMATIC,
+          f"LOD0/LOD1 keep the mesh's own Auto-resolved format ({formats})")
+    check(formats[2] == rf.VF_WEIGHTED,
+          f"LOD2's override forces Weighted regardless of the mesh's own "
+          f"setting ({formats[2]})")
+    tri_counts = [len(lod.models[0].mesh.indices) // 3
+                 for lod in result.lods]
+    check(all(a > b for a, b in zip(tri_counts, tri_counts[1:])),
+          f"each LOD still has fewer triangles than the last ({tri_counts})")
+
+
+def _make_batch_root(name, skeleton_name, add_mesh=True):
+    root = bpy.data.collections.new(name)
+    bpy.context.scene.collection.children.link(root)
+    root.rmv2.is_rmv2_root = True
+    root.rmv2.skeleton_name = skeleton_name
+    if add_mesh:
+        bpy.ops.mesh.primitive_cube_add()
+        obj = bpy.context.active_object
+        bpy.context.scene.collection.objects.unlink(obj)
+        root.objects.link(obj)
+    return root
+
+
+def batch_export_case(tmpdir):
+    print("\n=== Batch RMV2 export ===")
+    reset_scene()
+
+    _make_batch_root("batch_alpha", "skel_alpha")
+    _make_batch_root("batch_beta", "skel_beta")
+    _make_batch_root("batch_empty", "", add_mesh=False)
+
+    out_dir = os.path.join(tmpdir, "batch_out")
+    results = export_rmv2.export_batch(bpy.context, out_dir, {
+        "version": "7",
+        "apply_modifiers": True,
+        "high_precision": False,
+        "write_attach_points": True,
+        "global_scale": 1.0,
+    })
+    check(len(results) == 3,
+          f"one result per RMV2 root collection ({len(results)})")
+    by_name = {name: (stats, warnings) for name, stats, warnings in results}
+    check(by_name["batch_alpha"][0] is not None
+          and by_name["batch_beta"][0] is not None,
+          "both non-empty collections exported")
+    check(by_name["batch_empty"][0] is None and by_name["batch_empty"][1],
+          "empty collection skipped with a warning instead of crashing")
+
+    path_a = os.path.join(out_dir, "batch_alpha.rigid_model_v2")
+    path_b = os.path.join(out_dir, "batch_beta.rigid_model_v2")
+    check(os.path.isfile(path_a) and os.path.isfile(path_b),
+          "one file per collection, named after it")
+    with open(path_a, "rb") as handle:
+        out_a = rf.load(handle.read())
+    with open(path_b, "rb") as handle:
+        out_b = rf.load(handle.read())
+    check(out_a.skeleton_name == "skel_alpha"
+          and out_b.skeleton_name == "skel_beta",
+          "each file keeps its own collection's skeleton name, not one "
+          "shared value from the (forced-blank) batch options dict")
+
+    # Exercise the actual export operator's BATCH source end to end, not
+    # just the underlying export_rmv2.export_batch function.
+    reset_scene()
+    _make_batch_root("batch_op_alpha", "op_skel")
+    op_dir = os.path.join(tmpdir, "batch_op_out")
+    result = bpy.ops.export_scene.rmv2(
+        filepath=os.path.join(op_dir, "placeholder.rigid_model_v2"),
+        source="BATCH", version="7")
+    check(result == {"FINISHED"}, "batch export operator finished")
+    check(os.path.isfile(
+        os.path.join(op_dir, "batch_op_alpha.rigid_model_v2")),
+          "operator wrote the collection's file into the chosen folder")
+
+
 def anim_operator_case(tmpdir):
     print("\n=== .anim operators ===")
     reset_scene()
     path = write_anim(tmpdir, "op_skel.anim", make_skeleton_anim())
-    result = bpy.ops.import_scene.tw_skeleton(filepath=path)
+    result = bpy.ops.import_scene.tw_anim(filepath=path)
     check(result == {"FINISHED"}, "skeleton import operator finished")
     arm = next((o for o in bpy.data.objects if o.type == "ARMATURE"), None)
     check(arm is not None and len(arm.data.bones) == 4,
@@ -1241,10 +1692,16 @@ def main():
         error_case(tmpdir)
         operator_case(tmpdir)
         anim_skeleton_case(tmpdir)
+        bone_orientation_majority_case(tmpdir)
+        bone_orientation_symmetric_children_case(tmpdir)
         anim_flow1_case(tmpdir)
         anim_flow2_case(tmpdir)
         anim_animation_case(tmpdir)
         anim_mode_gating_case(tmpdir)
+        anim_auto_detect_case(tmpdir)
+        building_matrix_index_attach_case(tmpdir)
+        auto_lod_override_case(tmpdir)
+        batch_export_case(tmpdir)
         anim_operator_case(tmpdir)
     except Exception:
         traceback.print_exc()

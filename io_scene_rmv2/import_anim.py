@@ -1,21 +1,23 @@
 """Importer: .anim -> Blender armature / action.
 
-Two explicit modes (two File > Import menu entries):
+One File > Import menu entry; the intent (build a new armature, or apply
+the file onto an existing one) is inferred per-file - see
+`import_file`/`_looks_like_bindpose` - rather than chosen by the user:
 
-* SKELETON - build a new armature from the file's bone table. Meant for
-  bind-pose skeleton files (animations/skeletons/*.anim), whose single
-  frame becomes the rest pose. Refuses to run if the target model
-  already has an armature - a model gets exactly one armature, and it
-  is always linked into the model's RMV2 root collection.  Any targeted
-  meshes are attached to it: `bone_<i>` vertex groups are renamed to the
-  file's bone names and an armature modifier + parent is set up.
+* Building a fresh armature: from the file's bone table, its first frame
+  becomes the rest pose. Refuses to run if the target model already has
+  an armature - a model gets exactly one armature, and it is always
+  linked into the model's RMV2 root collection.  Any targeted meshes are
+  attached to it: `bone_<i>` vertex groups are renamed to the file's bone
+  names and an armature modifier + parent is set up.
 
-* ANIMATION - key the file onto the model's existing armature as an
-  action, matched by bone name (fallback: by bone index for our
-  `bone_<i>` names).  Refuses to run if no armature can be found (the
-  skeleton must be imported first).  Bones the file does not animate
-  keep the armature's rest pose, which mirrors how the game composes
-  animations with the skeleton's bind pose.
+* Applying as an animation: key the file onto the model's existing
+  armature as an action, matched by bone name (fallback: by bone index
+  for our `bone_<i>` names).  Refuses to run if no armature can be found
+  and the file doesn't look like a skeleton either, or if the armature's
+  stored skeleton name doesn't match the file's (wrong armature selected).
+  Bones the file does not animate keep the armature's rest pose, which
+  mirrors how the game composes animations with the skeleton's bind pose.
 
 "The target model" is resolved from the selection: selected meshes are
 expanded to their whole RMV2 model (hidden LOD collections included),
@@ -34,6 +36,7 @@ from __future__ import annotations
 import os
 
 import bpy
+import numpy as np
 from mathutils import Matrix, Quaternion, Vector
 
 from . import anim_format as af
@@ -160,6 +163,28 @@ def find_target(context):
     return root, list(meshes.values()), armature
 
 
+def _existing_armature_for_target(root_col, meshes):
+    """Armature genuinely known to belong to the resolved target model (via
+    its meshes' modifiers/parents, or linked into its root collection) -
+    unlike find_target's `armature` result, this deliberately ignores
+    whatever happens to be the bare active/selected object, which isn't
+    reliable evidence that THIS SPECIFIC model/target already has one.
+
+    Used only for the SKELETON path's "already has an armature" guard: a
+    skeleton imported with no model/root context yet (nothing to conflict
+    with) must be allowed to build a second, independent armature, but a
+    root collection that already contains one must still refuse."""
+    for obj in meshes:
+        armature = _mesh_armature(obj)
+        if armature is not None:
+            return armature
+    if root_col is not None:
+        for obj in root_col.all_objects:
+            if obj.type == "ARMATURE":
+                return obj
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Armature creation
 # ---------------------------------------------------------------------------
@@ -235,22 +260,106 @@ def build_armature(context, anim: af.AnimFile, resolved: af.ResolvedAnim,
             if 0 <= bone.parent < len(bones) and bone.parent != i:
                 created[i].parent = created[bone.parent]
 
-        # A bone's length is cosmetic; reaching towards the nearest child
-        # head makes the skeleton readable in the viewport.
+        # A bone's length/direction is cosmetic; the file's rotation data
+        # doesn't generally point a bone's local Y axis (the direction
+        # Blender draws the stick in) at any particular child - CA's rigs
+        # aren't authored with that constraint - so we apply a per-bone
+        # cosmetic rotation `fix[i]` that re-aims Y at whichever child
+        # best represents "the direction this bone visually continues
+        # in": the child that owns a clear majority (>50%) of the bone's
+        # total descendant count (so a spine bone with one dominant
+        # continuation and a small side-branch, e.g. a clavicle, still
+        # lines up with the spine), or the midpoint of all immediate
+        # children when no child has a majority (e.g. a symmetric
+        # two-legged pelvis split, or two tied leaf children). A leaf
+        # bone (no children), OR a bone whose children happen to
+        # straddle it symmetrically so their midpoint sits right on top
+        # of it (e.g. a vehicle axle centered exactly between its two
+        # wheels - real case, steamtank01.anim's axel_front_0/wheel_left
+        # _0/wheel_right_0 - the offset-to-aim-at would be ~zero-length,
+        # not a meaningful direction), continues its parent's incoming
+        # direction instead; a true leaf additionally scales its length
+        # to 55% of the parent's. The alternative, leaving the raw file
+        # rotation, looks just as arbitrary as an unfixed bone would (and
+        # was the original ~90-degrees-off bug this mechanism exists to
+        # fix - the axle case above regressed straight back into it
+        # before this fallback existed). This only touches the *visual*
+        # rest orientation: since it's a constant local rotation, it
+        # cancels out of the deform matrix (posed @ rest.inverted())
+        # entirely, so animation and skinning are unaffected as long as
+        # apply_animation/export undo the same fix - see
+        # skeleton.bone_fix_quaternion.
+        children_of = [[] for _ in bones]
+        for i, bone in enumerate(bones):
+            if 0 <= bone.parent < len(bones) and bone.parent != i:
+                children_of[bone.parent].append(i)
+
+        subtree_sizes = [None] * len(bones)
+
+        def subtree_size(i):
+            if subtree_sizes[i] is None:
+                subtree_sizes[i] = 1 + sum(subtree_size(c)
+                                           for c in children_of[i])
+            return subtree_sizes[i]
+
         heads = [m.translation for m in world]
+        fixes = [Quaternion()] * len(bones)
+        lengths = [None] * len(bones)
+
+        def compute(i):
+            if lengths[i] is not None:
+                return
+            kids = children_of[i]
+            offset = None
+            length = DEFAULT_BONE_LENGTH * scale
+            if kids:
+                total_descendants = subtree_size(i) - 1
+                majority = max(kids, key=subtree_size)
+                if subtree_size(majority) > total_descendants / 2:
+                    offset = heads[majority] - heads[i]
+                else:
+                    midpoint = sum((heads[c] for c in kids),
+                                  Vector()) / len(kids)
+                    offset = midpoint - heads[i]
+                if offset.length > 1e-5:
+                    length = offset.length
+                else:
+                    # Children can straddle this bone symmetrically (e.g.
+                    # an axle centered exactly between two wheels), which
+                    # leaves no meaningful "aim at the children" direction
+                    # - fall through to the parent-direction fallback
+                    # below instead of leaving fixes[i] at identity, which
+                    # would just show the raw, often-wrong file rotation
+                    # (the original bug this mechanism exists to fix).
+                    offset = None
+            if offset is None:
+                parent = bones[i].parent
+                if 0 <= parent < len(bones) and parent != i:
+                    compute(parent)
+                    if not kids:    # true leaf: also scale the length
+                        length = lengths[parent] * 0.55
+                    incoming = heads[i] - heads[parent]
+                    if incoming.length > 1e-5:
+                        offset = incoming
+            if offset is not None and offset.length > 1e-5:
+                d_local = world[i].to_3x3().inverted() @ offset.normalized()
+                fixes[i] = Vector((0.0, 1.0, 0.0)).rotation_difference(
+                    d_local)
+            lengths[i] = max(length, 1e-3)
+
         for i in range(len(bones)):
-            children = [j for j, b in enumerate(bones) if b.parent == i]
-            distances = [(heads[j] - heads[i]).length for j in children]
-            distances = [d for d in distances if d > 1e-5]
-            length = min(distances) if distances \
-                else DEFAULT_BONE_LENGTH * scale
-            created[i].length = max(length, 1e-3)
-            created[i].matrix = world[i]
+            compute(i)
+        for i in range(len(bones)):
+            created[i].length = lengths[i]
+            created[i].matrix = world[i] @ fixes[i].to_matrix().to_4x4()
     finally:
         bpy.ops.object.mode_set(mode="OBJECT")
 
     for i, bone_name in enumerate(bone_names):
         arm_data.bones[bone_name][skeleton.BONE_INDEX_PROP] = i
+        if fixes[i].angle > 1e-6:
+            arm_data.bones[bone_name][skeleton.BONE_FIX_QUAT_PROP] = \
+                fixes[i][:]
 
     arm_data.display_type = "STICK"
     arm_obj.show_in_front = True
@@ -258,18 +367,16 @@ def build_armature(context, anim: af.AnimFile, resolved: af.ResolvedAnim,
 
 
 def _store_metadata(arm_obj, anim: af.AnimFile):
-    """Remember the file's header on the armature so exports can default
-    to it. Applied animations overwrite what the skeleton import stored -
-    the flags/fps belong to the most recent animation."""
-    arm_data = arm_obj.data
+    """Remember the file's header on the armature (RMV2 (.anim) panel,
+    Object Data Properties) so exports can default to it. Applied
+    animations overwrite what the skeleton import stored - the
+    flags/fps belong to the most recent animation."""
+    s = arm_obj.data.rmv2
     if anim.skeleton_name:
-        arm_data[skeleton.SKELETON_NAME_PROP] = anim.skeleton_name
-    arm_data[skeleton.ANIM_VERSION_PROP] = anim.version
-    arm_data[skeleton.ANIM_FPS_PROP] = anim.frame_rate
-    if anim.flags:
-        arm_data[skeleton.ANIM_FLAGS_PROP] = list(anim.flags)
-    elif skeleton.ANIM_FLAGS_PROP in arm_data:
-        del arm_data[skeleton.ANIM_FLAGS_PROP]
+        s.skeleton_name = anim.skeleton_name
+    s.anim_version = anim.version
+    s.anim_fps = anim.frame_rate
+    s.flags = ", ".join(anim.flags)
 
 
 # ---------------------------------------------------------------------------
@@ -374,6 +481,16 @@ def apply_animation(context, arm_obj, anim: af.AnimFile,
         rest_quat = rest.to_quaternion()
         rest_loc = rest.translation
 
+        # Undo the cosmetic per-bone rest-orientation fix (see
+        # build_armature) before combining with `rest`, which already has
+        # it baked in: fix_p cancels when both bone and parent carry the
+        # same identity default, so this is a no-op for old/hand-made
+        # armatures.
+        fix_c = skeleton.bone_fix_quaternion(bone).to_matrix().to_4x4()
+        fix_p_inv = (skeleton.bone_fix_quaternion(bone.parent).to_matrix()
+                    .to_4x4().inverted() if bone.parent is not None
+                    else Matrix.Identity(4))
+
         pb.rotation_mode = "QUATERNION"
 
         locations = []
@@ -389,7 +506,9 @@ def apply_animation(context, arm_obj, anim: af.AnimFile,
                 rot = game_to_blender_quaternion(resolved.rotations[f][i])
             else:
                 rot = rest_quat
-            basis = rest_inv @ Matrix.LocRotScale(loc, rot, None)
+            local = Matrix.LocRotScale(loc, rot, None)
+            corrected = fix_p_inv @ local @ fix_c
+            basis = rest_inv @ corrected
             locations.append(basis.to_translation()[:])
             quat = basis.to_quaternion()
             if prev_quat is not None and prev_quat.dot(quat) < 0.0:
@@ -471,55 +590,101 @@ def _parse_fallback_name(name: str):
 # Entry point
 # ---------------------------------------------------------------------------
 
+def _looks_like_bindpose(resolved: af.ResolvedAnim) -> bool:
+    """Real bind-pose skeleton files carry 2-3 identical frames - they are
+    structurally indistinguishable from a very short static animation, so
+    this is a heuristic, not a format marker."""
+    num_frames = len(resolved.translations)
+    if not 1 <= num_frames <= 3:
+        return False
+    return (np.allclose(resolved.translations, resolved.translations[:1])
+            and np.allclose(resolved.rotations, resolved.rotations[:1]))
+
+
 def import_file(context, filepath: str, options: dict):
-    """Import one .anim file. options["mode"] is "SKELETON" or
-    "ANIMATION" (see module docstring).
+    """Import one .anim file. Builds a fresh armature or applies the file
+    onto an existing one as an action; options["mode"] can force
+    "SKELETON"/"ANIMATION" (used by tests and other programmatic callers).
+    Otherwise the intent is inferred from the file alone (not from whether
+    some armature happens to be selected/active - see _looks_like_bindpose
+    and the "building" check below), matching the pre-unification
+    Skeleton/Animation menu split:
+    - the skeleton name is "building" (ad-hoc animations for buildings/
+      props never ship a separate bind-pose skeleton file) or the file
+      looks like a bind pose -> build a fresh armature. Refuses if the
+      resolved target model (its meshes or root collection - see
+      _existing_armature_for_target) already has one, since a model gets
+      exactly one; a skeleton imported with no model/root context yet
+      (nothing to conflict with) is always allowed to build a second,
+      independent armature, even if some other armature happens to still
+      be the active object.
+    - otherwise -> apply as an animation onto the target armature, erroring
+      if none is found, or if the armature's stored skeleton name doesn't
+      match this file's (wrong armature selected).
     Returns (armature_object, stats, warnings)."""
     warnings: list[str] = []
     with open(filepath, "rb") as handle:
         data = handle.read()
     anim = af.load(data)
 
-    if len(anim.parts) > 1:
-        warnings.append(
-            f"File has {len(anim.parts)} animation parts; only the first "
-            "is imported")
-    resolved = af.resolve(anim, 0)
+    resolved = af.resolve_all(anim)
     num_frames = len(resolved.translations)
     scale = options.get("global_scale", 1.0)
     stem = os.path.splitext(os.path.basename(filepath))[0]
-    mode = options.get("mode", "ANIMATION")
+    is_building = anim.skeleton_name.strip().lower() == "building"
 
     root_col, meshes, arm_obj = find_target(context)
 
-    # Skeleton and animation files are structurally identical (bind-pose
-    # skeletons are just short animations whose 2-3 frames all repeat the
-    # bind pose), so no attempt is made to tell them apart - the mode is
-    # the user's statement of intent.
+    mode = options.get("mode")
+    if mode is None:
+        mode = "SKELETON" if (is_building or _looks_like_bindpose(resolved)) \
+            else "ANIMATION"
+
     created = False
     if mode == "SKELETON":
-        if arm_obj is not None:
+        existing = _existing_armature_for_target(root_col, meshes)
+        if existing is not None:
             target = root_col.name if root_col is not None \
-                else arm_obj.name
+                else existing.name
             raise AnimImportError(
                 f"'{target}' already has an armature "
-                f"('{arm_obj.name}') - a model gets exactly one. Use "
-                "File > Import > Total War Animation (.anim) to apply "
-                "animations to it")
-        arm_name = anim.skeleton_name or stem
+                f"('{existing.name}') - a model gets exactly one. To "
+                "import a second, independent copy of this skeleton for a "
+                "different model, select that model's mesh/collection "
+                "first. To apply this file as an animation, pass "
+                "mode=ANIMATION")
+        # Ad-hoc "building" files never ship a separate bind-pose skeleton
+        # file, so the armature is named after the .anim file itself; the
+        # skeleton name ("building", shared by every ad-hoc file) still
+        # goes into the stored metadata below, not the object name.
+        arm_name = stem if is_building else (anim.skeleton_name or stem)
         arm_obj = build_armature(context, anim, resolved, arm_name, scale,
                                  warnings, link_collection=root_col)
         created = True
     elif arm_obj is None:
         raise AnimImportError(
-            "No armature found in the selection / active collection. "
-            "Import the model's skeleton first: File > Import > "
-            "Total War Skeleton (.anim)")
+            "No armature found in the selection / active collection, and "
+            "this file doesn't look like a bind-pose skeleton (a skeleton "
+            "name of 'building', or 2-3 identical frames). Import the "
+            "model's skeleton first.")
+    else:
+        stored_name = arm_obj.data.rmv2.skeleton_name
+        if stored_name and anim.skeleton_name and \
+                stored_name.strip().lower() != anim.skeleton_name.strip() \
+                .lower():
+            raise AnimImportError(
+                f"'{arm_obj.name}' is skeleton '{stored_name}', but this "
+                f"file is for skeleton '{anim.skeleton_name}' - wrong "
+                "armature selected?")
 
     _store_metadata(arm_obj, anim)
 
+    # Ad-hoc "building" animations have no separate bind-pose file, so the
+    # frames built above ARE the animation - key them immediately instead
+    # of requiring a second, identical import once the armature exists.
     keyed = 0
-    if not created or (num_frames > 1 and options.get("import_animation",
+    if not created or is_building or (num_frames > 1
+                                      and options.get("import_animation",
                                                       False)):
         keyed = apply_animation(context, arm_obj, anim, resolved, stem,
                                 scale, warnings)

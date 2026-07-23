@@ -9,11 +9,10 @@ hand (or by other add-ons) fall back to Blender's bone order.
 
 from __future__ import annotations
 
+from mathutils import Matrix, Quaternion
+
 BONE_INDEX_PROP = "rmv2_bone_index"
-SKELETON_NAME_PROP = "rmv2_skeleton_name"
-ANIM_VERSION_PROP = "rmv2_anim_version"
-ANIM_FLAGS_PROP = "rmv2_anim_flags"
-ANIM_FPS_PROP = "rmv2_anim_fps"
+BONE_FIX_QUAT_PROP = "rmv2_bone_fix_quat"
 
 
 def fallback_bone_name(index: int) -> str:
@@ -64,6 +63,16 @@ def bone_index_by_name(armature_obj) -> dict:
     return {bone.name: index for index, bone in bone_index_pairs(armature_obj)}
 
 
+def bone_fix_quaternion(bone) -> Quaternion:
+    """The cosmetic rest-orientation correction stamped on `bone` at import
+    time (see import_anim.build_armature), identity if absent - bones from
+    old files or hand-made armatures are unaffected."""
+    raw = bone.get(BONE_FIX_QUAT_PROP)
+    if raw is None:
+        return Quaternion()
+    return Quaternion(tuple(raw))
+
+
 def find_context_armature(context):
     """Armature the user most plausibly means: the active object if it is
     one, otherwise the first selected armature, otherwise the armature a
@@ -104,3 +113,33 @@ def attach_mesh(mesh_obj, armature_obj):
         mesh_obj.parent_type = "OBJECT"
         mesh_obj.matrix_parent_inverse = \
             armature_obj.matrix_world.inverted_safe()
+
+
+def attach_to_bone(obj, armature_obj, bone_name):
+    """Rigidly follow one bone via a Child Of constraint - no vertex
+    groups or armature modifier, since the object itself moves with the
+    bone rather than deforming against it. Used for destructible-building
+    pieces (matrix_index-driven), which are genuinely rigid/unrigged, not
+    skinned - creating a vertex group for them would misreport them as
+    weighted for vertex-format/LOD purposes.
+
+    Deliberately does NOT "set inverse": the whole point of matrix_index
+    is that the piece belongs at the bone, so the bone's current (bind
+    -pose) transform is meant to move it there - same as a single
+    full-weight vertex group would, just without the deform machinery.
+    `inverse_matrix` is forced to identity so the object's own local
+    transform (its file pivot) is simply composed on top of the bone's
+    world transform - assigning `target`/`subtarget` alone is NOT enough,
+    Blender auto-computes an inverse that cancels the bone's CURRENT
+    transform the moment those are set (even through this same Python
+    API), which is the opposite of what's wanted here. Reuses an
+    existing Child Of constraint targeting this bone if present
+    (re-import)."""
+    for existing in obj.constraints:
+        if (existing.type == "CHILD_OF" and existing.target is armature_obj
+                and existing.subtarget == bone_name):
+            return
+    con = obj.constraints.new("CHILD_OF")
+    con.target = armature_obj
+    con.subtarget = bone_name
+    con.inverse_matrix = Matrix.Identity(4)

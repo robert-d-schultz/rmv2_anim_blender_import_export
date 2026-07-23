@@ -556,6 +556,52 @@ class TestAnimV8(unittest.TestCase):
         with self.assertRaises(af.AnimFormatError):
             af.load(blob + b"\0\0")
 
+    def test_multi_part_concatenates_in_order(self):
+        # The game plays parts back to back (AssetEditor's AnimationClip
+        # ctor just concatenates every part's frames), not as alternates
+        # or layers - resolve_all must reproduce that, not just read
+        # part 0. Bone a is dynamic in both parts (different values, so
+        # concatenation order is verifiable); bone b is static in both
+        # parts but with a *different* static value per part, so the
+        # combined static_translation flag must come out False even
+        # though it's static within each individual part.
+        out = self._header([("a", -1), ("b", 0)])
+        out += struct.pack("<I", 2)                  # part count
+
+        out += struct.pack("<bb", 12, -12)            # part 0 trans rates
+        out += struct.pack("<bb", 0, 0)               # no rotation data
+        out += struct.pack("<II", 0, 0)               # range map lengths
+        out += struct.pack("<II", 1, 0)               # static: 1 trans
+        out += struct.pack("<3f", 5.0, 6.0, 7.0)      # bone b static
+        out += struct.pack("<III", 1, 0, 2)           # dyn gate + frames
+        out += struct.pack("<3f", 1.0, 2.0, 3.0)
+        out += struct.pack("<3f", 2.0, 2.0, 3.0)
+
+        out += struct.pack("<bb", 12, -12)            # part 1 trans rates
+        out += struct.pack("<bb", 0, 0)
+        out += struct.pack("<II", 0, 0)
+        out += struct.pack("<II", 1, 0)
+        out += struct.pack("<3f", 10.0, 11.0, 12.0)   # bone b static (diff)
+        out += struct.pack("<III", 1, 0, 1)
+        out += struct.pack("<3f", 9.0, 9.0, 9.0)
+
+        anim = af.load(bytes(out))
+        self.assertEqual(len(anim.parts), 2)
+        self.assertEqual(anim.frame_count, 3)
+
+        res = af.resolve_all(anim)
+        self.assertEqual(res.translations.shape, (3, 2, 3))
+        np.testing.assert_allclose(
+            res.translations[:, 0],
+            [[1.0, 2.0, 3.0], [2.0, 2.0, 3.0], [9.0, 9.0, 9.0]], atol=1e-6)
+        np.testing.assert_allclose(
+            res.translations[:, 1],
+            [[5.0, 6.0, 7.0], [5.0, 6.0, 7.0], [10.0, 11.0, 12.0]],
+            atol=1e-6)
+        self.assertTrue(res.has_translation.all())
+        self.assertFalse(res.static_translation[1],
+                         "bone b's static value differs between parts")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

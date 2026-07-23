@@ -18,7 +18,13 @@ import renames them). File vertices are pivot-relative (the game renders
 raw + pivot), so they become the mesh-local coordinates and the pivot
 becomes the object origin. With an armature selected the meshes are
 parented to it with an armature modifier and the armature is moved into
-the root collection so the skeleton travels with the model.
+the root collection so the skeleton travels with the model. A building
+-like file (blank or "building" skeleton name) with a "building" armature
+selected instead rigidly constrains each unweighted mesh to its
+material's matrix_index bone via a Child Of constraint (destructible
+-building pieces - genuinely unrigged, so no vertex groups/armature
+modifier are involved) - see `attach_by_matrix_index` and
+`skeleton.attach_to_bone`.
 """
 
 from __future__ import annotations
@@ -315,10 +321,37 @@ def import_file(context, filepath: str, options: dict):
     if armature is not None:
         _adopt_armature(root, armature)
 
+    # A "building" armature's meshes are destructible-building pieces:
+    # rigid, matrix_index-driven, never truly bone-weighted, even though
+    # an armature is attached - so they must not count as "rigged" for
+    # the auto-LOD vertex-format defaults below.
+    armature_is_building = (
+        armature is not None
+        and armature.data.rmv2.skeleton_name.strip().lower() == "building")
+
+    # Auto-LOD override rows (Export > Generate LODs) start out populated
+    # with sane defaults - rigged models default their farther LODs to
+    # fewer bone influences - rather than an empty list the user has to
+    # fill in by hand; see export_rmv2.default_lod_overrides.
+    from .export_rmv2 import default_lod_overrides
+    default_lod_overrides(
+        root, rigged=armature is not None and not armature_is_building)
+
     attach_points = _collect_attach_points(rmv)
     bone_names = {}
     if armature is not None:
         bone_names = skeleton.bone_name_by_index(armature)
+
+    # Destructible-building pieces have no bone weights of their own -
+    # they're rigid meshes that follow a single bone/matrix, named by the
+    # material's matrix_index field. If this file is itself building-like
+    # (blank or "building" skeleton name - a real named skeleton's
+    # matrix_index wouldn't mean this) too, each unweighted mesh gets
+    # rigidly constrained to that bone below (skeleton.attach_to_bone)
+    # instead of the normal vertex-group-based attach.
+    attach_by_matrix_index = (
+        armature_is_building
+        and rmv.skeleton_name.strip().lower() in ("", "building"))
     for ap in attach_points:
         entry = root.rmv2.attach_points.add()
         entry.name = ap.name
@@ -348,7 +381,11 @@ def import_file(context, filepath: str, options: dict):
             obj = _build_mesh_object(model, rmv.version, name, scale,
                                      bone_names, options)
             col.objects.link(obj)
-            if armature is not None and obj.vertex_groups:
+            if attach_by_matrix_index and not obj.vertex_groups:
+                bone_name = bone_names.get(model.material.matrix_index)
+                if bone_name:
+                    skeleton.attach_to_bone(obj, armature, bone_name)
+            elif armature is not None and obj.vertex_groups:
                 skeleton.attach_mesh(obj, armature)
             stats["meshes"] += 1
             stats["vertices"] += model.mesh.vertex_count
