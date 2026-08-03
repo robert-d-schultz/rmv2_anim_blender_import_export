@@ -11,6 +11,39 @@ from bpy.props import IntProperty
 from .properties import ensure_default_textures
 
 # ---------------------------------------------------------------------------
+# Deferred default-texture fill
+# ---------------------------------------------------------------------------
+
+# Blender forbids mutating ID data (like adding to a CollectionProperty)
+# from inside a Panel.draw() callback - objects whose textures were never
+# initialized (anything imported before textures_initialized existed, or a
+# native never-imported mesh) would raise "Writing to ID classes in this
+# context is not allowed" the moment their RMV2 panel was drawn, leaving it
+# empty. Defer the actual write to a timer, which runs outside the
+# draw-callback's read-only context.
+_pending_default_texture_fills = set()
+
+
+def _defer_ensure_default_textures(obj_name):
+    if obj_name in _pending_default_texture_fills:
+        return
+
+    def _do_fill():
+        _pending_default_texture_fills.discard(obj_name)
+        obj = bpy.data.objects.get(obj_name)
+        if obj is not None and obj.type == "MESH":
+            ensure_default_textures(obj.rmv2)
+            for window in bpy.context.window_manager.windows:
+                for area in window.screen.areas:
+                    if area.type == "PROPERTIES":
+                        area.tag_redraw()
+        return None
+
+    _pending_default_texture_fills.add(obj_name)
+    bpy.app.timers.register(_do_fill)
+
+
+# ---------------------------------------------------------------------------
 # Operators
 # ---------------------------------------------------------------------------
 
@@ -297,8 +330,10 @@ class OBJECT_PT_rmv2(bpy.types.Panel):
 
     def draw(self, context):
         layout = self.layout
-        s = context.object.rmv2
-        ensure_default_textures(s)
+        obj = context.object
+        s = obj.rmv2
+        if not s.textures_initialized:
+            _defer_ensure_default_textures(obj.name)
         layout.use_property_split = True
         layout.use_property_decorate = False
 
