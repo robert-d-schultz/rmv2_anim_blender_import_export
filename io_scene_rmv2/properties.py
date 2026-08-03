@@ -70,6 +70,17 @@ def _texture_type_items():
 
 TEXTURE_TYPE_ITEMS = _texture_type_items()
 
+# Every exported material must carry these four texture types; whichever
+# aren't set on an object fall back to these placeholder paths, so the game
+# never renders a texture-less (pink/black) material. See
+# ensure_default_textures() below for where they get filled in.
+DEFAULT_TEXTURES = {
+    27: "commontextures/default_base_colour.dds",   # BaseColour
+    29: "commontextures/default_material_map.dds",  # MaterialMap
+    1: "commontextures/default_normal.dds",          # Normal
+    3: "commontextures/test_mask.dds",               # Mask
+}
+
 ALPHA_MODE_ITEMS = [
     ("NONE", "Not Set", "Do not write an alpha parameter"),
     ("OPAQUE", "Opaque", "Alpha int param = 0"),
@@ -152,10 +163,34 @@ class RMV2ObjectSettings(bpy.types.PropertyGroup):
         name="Parent Matrix Index", default=-1, soft_min=-1, soft_max=255)
     textures: CollectionProperty(type=RMV2TextureSlot)
     active_texture_index: IntProperty(default=0)
+    textures_initialized: BoolProperty(
+        default=False,
+        description="Internal: whether the 4 default texture slots have "
+        "already been filled in or deliberately edited, so they don't get "
+        "re-added")
     extra_json: StringProperty(
         name="Extra Data (JSON)", default="",
         description="Preserved raw fields: transform matrices, padding, "
         "shader bytes and string/float/int/vec4 parameter lists")
+
+
+def ensure_default_textures(settings: RMV2ObjectSettings) -> None:
+    """Fill in whichever of the 4 core texture types (BaseColour,
+    MaterialMap, Normal, Mask) are missing from `settings.textures` with
+    DEFAULT_TEXTURES, once per object - so a freshly added mesh (or a file
+    imported without all 4) shows complete, editable slots in the RMV2
+    panel instead of silently patching them in only at export time. A no-op
+    once `textures_initialized` is set, so deliberately clearing a slot
+    later doesn't bring the default back."""
+    if settings.textures_initialized:
+        return
+    present = {slot.type_as_int() for slot in settings.textures}
+    for ttype, path in DEFAULT_TEXTURES.items():
+        if ttype not in present:
+            slot = settings.textures.add()
+            slot.set_type_from_int(ttype)
+            slot.path = path
+    settings.textures_initialized = True
 
 
 class RMV2AttachPoint(bpy.types.PropertyGroup):

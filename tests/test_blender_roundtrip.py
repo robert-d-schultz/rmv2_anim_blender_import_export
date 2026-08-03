@@ -27,6 +27,7 @@ from io_scene_rmv2 import anim_format as af  # noqa: E402
 from io_scene_rmv2 import export_anim, export_rmv2  # noqa: E402
 from io_scene_rmv2 import import_anim, import_rmv2  # noqa: E402
 from io_scene_rmv2 import materials as rmv2_materials  # noqa: E402
+from io_scene_rmv2 import properties as rmv2_properties  # noqa: E402
 from io_scene_rmv2 import rmv2_format as rf  # noqa: E402
 from io_scene_rmv2 import skeleton as rmv2_skeleton  # noqa: E402
 from io_scene_rmv2 import utils  # noqa: E402
@@ -259,7 +260,11 @@ def roundtrip_case(tmpdir, version, vertex_format, label):
         check([(a.name, a.bone_index) for a in root.rmv2.attach_points]
               == [("root", 0), ("spine_0", 3)],
               "attachment points stored as a list on the root collection")
-    check(len(obj.rmv2.textures) == 3, "texture slots imported")
+    check(len(obj.rmv2.textures) == 5,
+          "texture slots imported (3 from file + 2 default-filled: "
+          "MaterialMap, Mask)")
+    check(obj.rmv2.textures_initialized,
+          "textures_initialized set after import's default-fill pass")
     check(obj.rmv2.alpha_mode == "TRANSPARENT", "alpha mode imported")
     check(obj.data.materials and obj.data.materials[0].use_nodes,
           "Blender material built")
@@ -300,7 +305,8 @@ def roundtrip_case(tmpdir, version, vertex_format, label):
         check(m_out.material.model_name == m_in.material.model_name,
               f"lod{li} model name kept")
         expected_textures = list(m_in.material.textures) + [
-            (ttype, path) for ttype, path in export_rmv2._DEFAULT_TEXTURES.items()
+            (ttype, path)
+            for ttype, path in rmv2_properties.DEFAULT_TEXTURES.items()
             if ttype not in {t for t, _ in m_in.material.textures}]
         check(m_out.material.textures == expected_textures,
               f"lod{li} textures kept (plus fallback defaults for unset "
@@ -367,9 +373,13 @@ def native_export_case(tmpdir):
           "AUTO material became default_type")
     check(model.mesh.vertex_count > 0 and len(model.mesh.indices) > 0,
           "geometry written")
-    check(dict(model.material.textures) == export_rmv2._DEFAULT_TEXTURES,
+    check(dict(model.material.textures) == rmv2_properties.DEFAULT_TEXTURES,
           "a mesh with no textures configured gets all 4 fallback "
           "defaults on export")
+    check(len(sphere.rmv2.textures) == 4
+          and sphere.rmv2.textures_initialized,
+          "the defaults used for export are also written back onto the "
+          "object's own RMV2 panel, not just the exported bytes")
     # sphere of radius 1: positions must stay on the unit sphere
     radii = np.linalg.norm(model.mesh.positions, axis=1)
     check(abs(radii.max() - 1.0) < 5e-3 and abs(radii.min() - 1.0) < 5e-3,
@@ -378,6 +388,50 @@ def native_export_case(tmpdir):
     dots = (utils.normalize_rows(model.mesh.positions)
             * model.mesh.normals).sum(axis=1)
     check(dots.min() > 0.5, f"normals outward (min dot {dots.min():.3f})")
+
+
+def default_textures_case():
+    print("\n=== RMV2 panel default textures (ensure_default_textures) ===")
+    reset_scene()
+
+    # A freshly added mesh starts with no texture slots at all - the panel
+    # only fills them in on first draw/import/export, mirroring what an
+    # actual "Add > Mesh > Cube" leaves behind before anyone opens the tab.
+    bpy.ops.mesh.primitive_cube_add()
+    cube = bpy.context.active_object
+    check(len(cube.rmv2.textures) == 0 and not cube.rmv2.textures_initialized,
+          "brand new object starts with no texture slots")
+
+    rmv2_properties.ensure_default_textures(cube.rmv2)
+    got = {slot.type_as_int(): slot.path for slot in cube.rmv2.textures}
+    check(got == rmv2_properties.DEFAULT_TEXTURES,
+          "all 4 defaults filled in for a mesh with no textures at all")
+    check(cube.rmv2.textures_initialized,
+          "textures_initialized set after the fill")
+
+    # Idempotent: a user-deleted slot must not silently come back.
+    cube.rmv2.textures.remove(0)
+    rmv2_properties.ensure_default_textures(cube.rmv2)
+    check(len(cube.rmv2.textures) == 3,
+          "already-initialized object is left alone - a deliberately "
+          "removed slot doesn't get re-added")
+
+    # Partial: an object with one texture already set (e.g. hand-authored)
+    # only gets the other 3 core types filled in, and its own value for the
+    # one it already had is left untouched.
+    bpy.ops.mesh.primitive_cube_add()
+    cube2 = bpy.context.active_object
+    slot = cube2.rmv2.textures.add()
+    slot.texture_type = "BaseColour"
+    slot.path = "variantmeshes\\custom\\my_base_colour.dds"
+    rmv2_properties.ensure_default_textures(cube2.rmv2)
+    got2 = {slot.type_as_int(): slot.path for slot in cube2.rmv2.textures}
+    check(got2[27] == "variantmeshes\\custom\\my_base_colour.dds",
+          "a texture the user already set is left untouched")
+    check(len(got2) == 4 and all(
+        got2[t] == rmv2_properties.DEFAULT_TEXTURES[t]
+        for t in rmv2_properties.DEFAULT_TEXTURES if t != 27),
+          "the other 3 core types get filled in around it")
 
 
 def auto_lod_case(tmpdir):
@@ -1856,6 +1910,7 @@ def main():
         roundtrip_case(tmpdir, 6, rf.VF_STATIC, "static")
         roundtrip_case(tmpdir, 8, rf.VF_STATIC, "static_v8")
         native_export_case(tmpdir)
+        default_textures_case()
         auto_lod_case(tmpdir)
         skinned_native_case(tmpdir)
         material_node_case()

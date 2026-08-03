@@ -8,6 +8,8 @@ import re
 import bpy
 from bpy.props import IntProperty
 
+from .properties import ensure_default_textures
+
 # ---------------------------------------------------------------------------
 # Operators
 # ---------------------------------------------------------------------------
@@ -201,6 +203,7 @@ class RMV2_OT_copy_settings(bpy.types.Operator):
                 new.texture_type = slot.texture_type
                 new.raw_type = slot.raw_type
                 new.path = slot.path
+            dst.textures_initialized = src.textures_initialized
             count += 1
         self.report({"INFO"}, f"Copied RMV2 settings to {count} object(s)")
         return {"FINISHED"}
@@ -295,6 +298,7 @@ class OBJECT_PT_rmv2(bpy.types.Panel):
     def draw(self, context):
         layout = self.layout
         s = context.object.rmv2
+        ensure_default_textures(s)
         layout.use_property_split = True
         layout.use_property_decorate = False
 

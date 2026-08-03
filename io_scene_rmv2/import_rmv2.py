@@ -40,7 +40,7 @@ from . import materials as rmv2_materials
 from . import rmv2_format as rf
 from . import skeleton
 from . import utils
-from .properties import VERTEX_FORMAT_FROM_INT
+from .properties import VERTEX_FORMAT_FROM_INT, ensure_default_textures
 
 
 # ---------------------------------------------------------------------------
@@ -164,6 +164,7 @@ def _fill_object_settings(obj, model, material):
         slot = s.textures.add()
         slot.set_type_from_int(ttype)
         slot.path = path
+    ensure_default_textures(s)
     s.extra_json = _build_extra_json(material, model)
 
 
