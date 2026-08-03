@@ -177,14 +177,18 @@ class RMV2ObjectSettings(bpy.types.PropertyGroup):
 def ensure_default_textures(settings: RMV2ObjectSettings) -> None:
     """Fill in whichever of the 4 core texture types (BaseColour,
     MaterialMap, Normal, Mask) are missing from `settings.textures` with
-    DEFAULT_TEXTURES, once per object - so a brand new mesh (never
-    imported) shows complete, editable slots in the RMV2 panel instead of
-    only ever getting them patched in at export time. Not used for
-    imported objects - those keep exactly what the RMV2 file had; see
-    import_rmv2._fill_object_settings, which sets textures_initialized
-    itself instead of calling this. A no-op once `textures_initialized` is
-    set, so deliberately clearing a slot later doesn't bring the default
-    back."""
+    DEFAULT_TEXTURES, once per object - a starting point for a brand new
+    mesh (never imported), shown as ordinary editable slots in the RMV2
+    panel (see ui.py's OBJECT_PT_rmv2.draw). Deliberately *not* called from
+    the exporter: not every Total War game even uses BaseColour, so
+    silently writing these paths into a file the user hasn't looked at
+    would be wrong for some games and invisible either way - if a mesh's
+    textures list is incomplete at export time, that's exported as-is.
+    Also not used for imported objects - those keep exactly what the RMV2
+    file had; see import_rmv2._fill_object_settings, which sets
+    textures_initialized itself instead of calling this. A no-op once
+    `textures_initialized` is set, so deliberately clearing a slot later
+    doesn't bring the default back."""
     if settings.textures_initialized:
         return
     present = {slot.type_as_int() for slot in settings.textures}

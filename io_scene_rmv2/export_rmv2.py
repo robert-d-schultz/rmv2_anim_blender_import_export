@@ -24,7 +24,7 @@ import numpy as np
 from . import rmv2_format as rf
 from . import skeleton
 from . import utils
-from .properties import VERTEX_FORMAT_TO_INT, ensure_default_textures
+from .properties import VERTEX_FORMAT_TO_INT
 
 _BONE_PATTERN = re.compile(r"^bone_(\d+)$")
 
@@ -631,7 +631,6 @@ def _material_from_settings(obj, settings, fmt: int, scale: float,
         except ValueError:
             pass
 
-    ensure_default_textures(settings)
     mat.textures = [(slot.type_as_int(), slot.path)
                     for slot in settings.textures if slot.path]
     mat.string_params = [(int(i), str(v))

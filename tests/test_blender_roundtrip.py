@@ -368,13 +368,12 @@ def native_export_case(tmpdir):
           "AUTO material became default_type")
     check(model.mesh.vertex_count > 0 and len(model.mesh.indices) > 0,
           "geometry written")
-    check(dict(model.material.textures) == rmv2_properties.DEFAULT_TEXTURES,
-          "a mesh with no textures configured gets all 4 fallback "
-          "defaults on export")
-    check(len(sphere.rmv2.textures) == 4
-          and sphere.rmv2.textures_initialized,
-          "the defaults used for export are also written back onto the "
-          "object's own RMV2 panel, not just the exported bytes")
+    check(len(model.material.textures) == 0,
+          "a mesh whose RMV2 panel was never opened exports exactly what "
+          "it has - no default textures silently inserted at export time")
+    check(len(sphere.rmv2.textures) == 0
+          and not sphere.rmv2.textures_initialized,
+          "exporting doesn't touch the object's own texture slots either")
     # sphere of radius 1: positions must stay on the unit sphere
     radii = np.linalg.norm(model.mesh.positions, axis=1)
     check(abs(radii.max() - 1.0) < 5e-3 and abs(radii.min() - 1.0) < 5e-3,
