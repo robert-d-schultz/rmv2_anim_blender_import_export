@@ -792,22 +792,32 @@ class RmvModel:
         return (0.0, 0.0, 0.0), (0.0, 0.0, 0.0)
 
 
+# Stamped into the 3 bytes after quality_level on every LOD header this
+# add-on writes (see save()), so a file can be recognized as having passed
+# through this exporter. Those bytes are compiler struct-alignment padding
+# with no meaning to the game or to CA's tools - gen_tree_oak_large_03
+# carries the same stale (157, 55, 149) on all 3 of its LODs while the real
+# quality byte in front of them varies 2/0/0, and AssetEditor stamps its own
+# arbitrary (125, 136, 174) - so repurposing them is safe for the game.
+# RPFM reads quality_level as a u32 spanning all 4 bytes
+# (rpfm_lib/src/files/rigidmodel/versions/v8.rs) and casts that to i32, so
+# the last byte is kept < 0x80: that keeps the sign bit clear so RPFM never
+# clamps the displayed value to a silently-wrong 0, at the cost of RPFM
+# showing a large (but honest, non-zero, obviously-not-a-quality-level)
+# number instead of the real quality byte while this signature is present.
+EXPORT_SIGNATURE = (0x52, 0x62, 0x00)  # ASCII 'R', 'b', + sign-safe 0 guard
+
+
 @dataclass
 class RmvLod:
     models: list = field(default_factory=list)
     camera_distance: float = 0.0
     lod_level: int = 0
     quality_level: int = 0
-    # The 3 bytes after the 1-byte quality_level. They really are padding -
-    # gen_tree_oak_large_03 carries the same stale (157, 55, 149) on all 3
-    # of its LODs while the quality byte in front of them varies 2/0/0 -
-    # but they must be written as ZERO, not as AssetEditor's (125, 136,
-    # 174) stamp. RPFM reads quality_level as a u32 spanning all 4 bytes
-    # (rpfm_lib/src/files/rigidmodel/versions/v8.rs), so a non-zero pad
-    # turns quality 2 into 0xAE887D02; its UI then casts that to i32,
-    # gets a negative, and clamps to the spinbox minimum - showing 0 and
-    # writing 0 back if the file is saved. Vanilla files are almost all
-    # zero here, and zero reads correctly under both interpretations.
+    # What was actually read from the 3 padding bytes on load (or (0, 0, 0)
+    # for a freshly-created LOD). save() ignores this and always writes
+    # EXPORT_SIGNATURE instead - this field exists so loaded values are
+    # available to inspect/debug, not because save() round-trips them.
     padding: tuple = (0, 0, 0)
 
 
@@ -986,7 +996,7 @@ def save(rmv: RmvFile, high_precision: bool = True,
             out += lod_struct.pack(len(entries), total_vertex, total_index,
                                    running, lod.camera_distance)
         else:
-            pad = lod.padding if len(lod.padding) == 3 else (0, 0, 0)
+            pad = EXPORT_SIGNATURE
             out += lod_struct.pack(len(entries), total_vertex, total_index,
                                    running, lod.camera_distance,
                                    lod.lod_level, lod.quality_level & 0xFF,

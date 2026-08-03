@@ -1786,26 +1786,31 @@ def auto_lod_override_case(tmpdir):
     check([lod.quality_level for lod in result.lods] == [0, 1, 2],
           "per-row quality levels used")
 
-    # The 3 bytes after the 1-byte quality_level must be written as zero.
-    # They really are padding (vanilla gen_tree_oak_large_03 repeats the
-    # same stale triple on every LOD while the quality byte in front of
-    # them varies), but RPFM reads quality_level as a u32 spanning all 4
-    # bytes - a non-zero pad turns quality 2 into 0xAE887D02, which its UI
-    # casts to a negative i32 and clamps to 0, then writes 0 back on save.
+    # The 3 bytes after the 1-byte quality_level are compiler struct-
+    # alignment padding with no meaning to the game or to CA's tools
+    # (vanilla gen_tree_oak_large_03 repeats the same stale triple on every
+    # LOD while the quality byte in front of them varies), so this add-on
+    # stamps its own EXPORT_SIGNATURE there to fingerprint files it wrote.
+    # RPFM reads quality_level as a u32 spanning all 4 bytes
+    # (rpfm_lib/src/files/rigidmodel/versions/v8.rs) and casts that to i32,
+    # so the last byte must stay < 0x80 - otherwise the sign bit flips and
+    # RPFM's UI clamps the displayed value to a silently-wrong 0.
     with open(path, "rb") as handle:
         raw = handle.read()
     lod_hdr = 12 + 128
     pads = [raw[lod_hdr + i * 28 + 25:lod_hdr + i * 28 + 27 + 1]
             for i in range(len(result.lods))]
-    check(all(p == b"\0\0\0" for p in pads),
-          f"quality_level's 3 trailing pad bytes written as zero "
+    sig = bytes(rf.EXPORT_SIGNATURE)
+    check(all(p == sig for p in pads),
+          f"quality_level's 3 trailing pad bytes carry the export signature "
           f"({[p.hex(' ') for p in pads]})")
     as_u32 = [np.frombuffer(raw, dtype="<u4", count=1,
                             offset=lod_hdr + i * 28 + 24)[0]
               for i in range(len(result.lods))]
-    check([int(v) for v in as_u32] == [0, 1, 2],
-          f"quality still reads correctly when parsed as a u32 the way "
-          f"RPFM does ({[int(v) for v in as_u32]})")
+    check(all(int(v) >= 0 for v in as_u32),
+          f"signature keeps quality_level's u32-as-i32 reading (the way "
+          f"RPFM parses it) non-negative, so RPFM never clamps it to a "
+          f"silently-wrong 0 ({[int(v) for v in as_u32]})")
 
     formats = [lod.models[0].material.vertex_format for lod in result.lods]
     check(formats[0] == rf.VF_CINEMATIC and formats[1] == rf.VF_CINEMATIC,
