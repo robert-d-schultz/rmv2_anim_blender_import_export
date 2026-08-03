@@ -767,7 +767,7 @@ def _parse_material(buf: bytes, offset: int, material_id: int,
 # Model / LOD / File containers
 # ---------------------------------------------------------------------------
 
-DEFAULT_SHADER_NAME = "default_dry "
+DEFAULT_SHADER_NAME = "default_dry"
 
 
 @dataclass
