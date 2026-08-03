@@ -1735,6 +1735,13 @@ def auto_lod_override_case(tmpdir):
           "/Weighted2")
     check(defaults[0].decimate_ratio == 1.0,
           "LOD0's default ratio is still 1.0 (unmodified)")
+    # quality_level is "lowest graphics setting this LOD is active on", so
+    # it counts DOWN to 0 at the coarsest LOD - the cheap far LODs stay
+    # visible everywhere, the expensive LOD0 only on higher settings.
+    # Matches vanilla (gen_tree_oak_large_01 is [2, 0, 0]).
+    check([r.quality_level for r in defaults] == [2, 1, 0, 0],
+          f"default quality levels count down to 0, not up "
+          f"({[r.quality_level for r in defaults]})")
 
     # Now set up a specific 3-row (LOD0/1/2) override for the rest of the
     # test, row index == LOD level.
@@ -1778,6 +1785,28 @@ def auto_lod_override_case(tmpdir):
           == [20, 30, 90], "per-row camera distances used (LOD0 default)")
     check([lod.quality_level for lod in result.lods] == [0, 1, 2],
           "per-row quality levels used")
+
+    # The 3 bytes after the 1-byte quality_level must be written as zero.
+    # They really are padding (vanilla gen_tree_oak_large_03 repeats the
+    # same stale triple on every LOD while the quality byte in front of
+    # them varies), but RPFM reads quality_level as a u32 spanning all 4
+    # bytes - a non-zero pad turns quality 2 into 0xAE887D02, which its UI
+    # casts to a negative i32 and clamps to 0, then writes 0 back on save.
+    with open(path, "rb") as handle:
+        raw = handle.read()
+    lod_hdr = 12 + 128
+    pads = [raw[lod_hdr + i * 28 + 25:lod_hdr + i * 28 + 27 + 1]
+            for i in range(len(result.lods))]
+    check(all(p == b"\0\0\0" for p in pads),
+          f"quality_level's 3 trailing pad bytes written as zero "
+          f"({[p.hex(' ') for p in pads]})")
+    as_u32 = [np.frombuffer(raw, dtype="<u4", count=1,
+                            offset=lod_hdr + i * 28 + 24)[0]
+              for i in range(len(result.lods))]
+    check([int(v) for v in as_u32] == [0, 1, 2],
+          f"quality still reads correctly when parsed as a u32 the way "
+          f"RPFM does ({[int(v) for v in as_u32]})")
+
     formats = [lod.models[0].material.vertex_format for lod in result.lods]
     check(formats[0] == rf.VF_CINEMATIC and formats[1] == rf.VF_CINEMATIC,
           f"LOD0/LOD1 keep the mesh's own Auto-resolved format ({formats})")
@@ -1788,6 +1817,39 @@ def auto_lod_override_case(tmpdir):
                  for lod in result.lods]
     check(all(a > b for a, b in zip(tri_counts, tri_counts[1:])),
           f"each LOD still has fewer triangles than the last ({tri_counts})")
+
+
+def lod_overrides_autofill_case():
+    """Flagging a from-scratch collection as an RMV2 root fills in the
+    default auto-LOD override rows immediately, so the user doesn't have
+    to know to press the reset button first."""
+    print("\n=== Auto-LOD overrides auto-fill on is_rmv2_root ===")
+    reset_scene()
+
+    col = bpy.data.collections.new("fresh_root")
+    bpy.context.scene.collection.children.link(col)
+    check(len(col.rmv2.lod_overrides) == 0,
+          "a plain collection has no override rows")
+
+    col.rmv2.is_rmv2_root = True
+    rows = col.rmv2.lod_overrides
+    check(len(rows) == 4,
+          f"flagging it as an RMV2 root fills in the 4 default rows with no "
+          f"reset-button press ({len(rows)})")
+    check([r.quality_level for r in rows] == [2, 1, 0, 0],
+          f"auto-filled rows use the counting-down quality defaults "
+          f"({[r.quality_level for r in rows]})")
+    check([round(r.camera_distance) for r in rows] == [20, 40, 80, 160],
+          "auto-filled rows get the doubling camera distances")
+
+    # Toggling the flag must not clobber edits the user has since made.
+    rows[0].quality_level = 99
+    col.rmv2.is_rmv2_root = False
+    col.rmv2.is_rmv2_root = True
+    check(len(col.rmv2.lod_overrides) == 4
+          and col.rmv2.lod_overrides[0].quality_level == 99,
+          "re-flagging an already-populated root leaves the user's rows "
+          "alone instead of resetting them")
 
 
 def _make_batch_root(name, skeleton_name, add_mesh=True):
@@ -1922,6 +1984,7 @@ def main():
         building_reverse_order_attach_case(tmpdir)
         anim_duplicate_bone_names_case(tmpdir)
         auto_lod_override_case(tmpdir)
+        lod_overrides_autofill_case()
         batch_export_case(tmpdir)
         anim_operator_case(tmpdir)
     except Exception:

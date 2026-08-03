@@ -798,7 +798,17 @@ class RmvLod:
     camera_distance: float = 0.0
     lod_level: int = 0
     quality_level: int = 0
-    padding: tuple = (125, 136, 174)   # the values AssetEditor writes
+    # The 3 bytes after the 1-byte quality_level. They really are padding -
+    # gen_tree_oak_large_03 carries the same stale (157, 55, 149) on all 3
+    # of its LODs while the quality byte in front of them varies 2/0/0 -
+    # but they must be written as ZERO, not as AssetEditor's (125, 136,
+    # 174) stamp. RPFM reads quality_level as a u32 spanning all 4 bytes
+    # (rpfm_lib/src/files/rigidmodel/versions/v8.rs), so a non-zero pad
+    # turns quality 2 into 0xAE887D02; its UI then casts that to i32,
+    # gets a negative, and clamps to the spinbox minimum - showing 0 and
+    # writing 0 back if the file is saved. Vanilla files are almost all
+    # zero here, and zero reads correctly under both interpretations.
+    padding: tuple = (0, 0, 0)
 
 
 @dataclass
@@ -916,7 +926,8 @@ def load(data: bytes) -> RmvFile:
             camera_distance=header["camera_distance"],
             lod_level=header.get("lod_level", i),
             quality_level=header.get("quality_level", 0),
-            padding=header.get("padding", (125, 136, 174)),
+            # v5/v6 headers have no such field; upgrading to v7+ writes zeros
+            padding=header.get("padding", (0, 0, 0)),
         )
         offset = header["first_mesh_offset"]
         for _ in range(header["mesh_count"]):
@@ -975,7 +986,7 @@ def save(rmv: RmvFile, high_precision: bool = True,
             out += lod_struct.pack(len(entries), total_vertex, total_index,
                                    running, lod.camera_distance)
         else:
-            pad = lod.padding if len(lod.padding) == 3 else (125, 136, 174)
+            pad = lod.padding if len(lod.padding) == 3 else (0, 0, 0)
             out += lod_struct.pack(len(entries), total_vertex, total_index,
                                    running, lod.camera_distance,
                                    lod.lod_level, lod.quality_level & 0xFF,

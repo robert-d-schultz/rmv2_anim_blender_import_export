@@ -237,10 +237,24 @@ class RMV2LodOverride(bpy.types.PropertyGroup):
         "active (0 = visible on all settings)")
 
 
+def _on_is_rmv2_root_update(self, context):
+    """Auto-fill the 4 default auto-LOD override rows the moment a
+    collection is flagged as an RMV2 root, same as what RMV2 import does -
+    so a from-scratch collection doesn't start with an empty, useless
+    override list that the user has to know to fill via the reset button."""
+    if not self.is_rmv2_root or self.lod_overrides:
+        return
+    from .export_rmv2 import default_lod_overrides
+    from .ui import _collection_is_rigged
+    collection = self.id_data
+    default_lod_overrides(collection, _collection_is_rigged(collection))
+
+
 class RMV2CollectionSettings(bpy.types.PropertyGroup):
     is_rmv2_root: BoolProperty(
         name="RMV2 Root", default=False,
-        description="This collection represents one .rigid_model_v2 file")
+        description="This collection represents one .rigid_model_v2 file",
+        update=_on_is_rmv2_root_update)
     version: EnumProperty(
         name="Version", items=VERSION_ITEMS, default="7")
     skeleton_name: StringProperty(

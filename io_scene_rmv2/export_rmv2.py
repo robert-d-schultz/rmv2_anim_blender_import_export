@@ -97,6 +97,11 @@ def default_lod_overrides(root_collection, rigged: bool):
     influences) else Static for all four - an explicit override, not
     Auto: an unrigged model's LODs should stay static regardless of
     what any individual mesh's own object-level setting happens to be.
+    quality_level counts down from the finest LOD to 0 at the coarsest:
+    quality_level is the lowest graphics setting a LOD is active on, so
+    the coarse/far LODs (cheap, always fine to show) should stay visible
+    at every setting while the expensive close-up LOD0 is reserved for
+    higher settings.
     Used both right after RMV2 import (import_rmv2.import_file) and by
     the "reset to defaults" button."""
     s = root_collection.rmv2
@@ -108,7 +113,7 @@ def default_lod_overrides(root_collection, rigged: bool):
         entry.vertex_format = formats[level]
         entry.decimate_ratio = 1.0 if level == 0 else 0.5 ** level
         entry.camera_distance = default_camera_distance(level)
-        entry.quality_level = max(0, level - 1)
+        entry.quality_level = max(0, 2 - level)
 
 
 def _lods_for_root(root):
