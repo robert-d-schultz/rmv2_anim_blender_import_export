@@ -260,11 +260,10 @@ def roundtrip_case(tmpdir, version, vertex_format, label):
         check([(a.name, a.bone_index) for a in root.rmv2.attach_points]
               == [("root", 0), ("spine_0", 3)],
               "attachment points stored as a list on the root collection")
-    check(len(obj.rmv2.textures) == 5,
-          "texture slots imported (3 from file + 2 default-filled: "
-          "MaterialMap, Mask)")
+    check(len(obj.rmv2.textures) == 3, "texture slots imported")
     check(obj.rmv2.textures_initialized,
-          "textures_initialized set after import's default-fill pass")
+          "textures_initialized set on import so the default-texture "
+          "fallback never overwrites what the file actually had")
     check(obj.rmv2.alpha_mode == "TRANSPARENT", "alpha mode imported")
     check(obj.data.materials and obj.data.materials[0].use_nodes,
           "Blender material built")
@@ -304,13 +303,9 @@ def roundtrip_case(tmpdir, version, vertex_format, label):
               f"lod{li} material id kept")
         check(m_out.material.model_name == m_in.material.model_name,
               f"lod{li} model name kept")
-        expected_textures = list(m_in.material.textures) + [
-            (ttype, path)
-            for ttype, path in rmv2_properties.DEFAULT_TEXTURES.items()
-            if ttype not in {t for t, _ in m_in.material.textures}]
-        check(m_out.material.textures == expected_textures,
-              f"lod{li} textures kept (plus fallback defaults for unset "
-              "types)")
+        check(m_out.material.textures == m_in.material.textures,
+              f"lod{li} textures kept as-is (no fallback defaults injected "
+              "for an imported object)")
         check(m_out.material.texture_directory
               == m_in.material.texture_directory,
               f"lod{li} texture dir kept")
