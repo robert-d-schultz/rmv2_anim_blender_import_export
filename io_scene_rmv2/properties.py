@@ -132,7 +132,7 @@ def _texture_name_to_int(name: str) -> int:
 
 class RMV2ObjectSettings(bpy.types.PropertyGroup):
     model_name: StringProperty(
-        name="Model Name", default="", maxlen=31,
+        name="Model Name Override", default="", maxlen=31,
         description="Mesh name stored in the file (max 31 chars). "
         "Empty = use the object name")
     vertex_format: EnumProperty(

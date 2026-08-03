@@ -409,8 +409,11 @@ class COLLECTION_PT_rmv2(bpy.types.Panel):
                 text=f"Auto-LOD Overrides ({len(s.lod_overrides)})",
                 icon="MOD_DECIM")
             lod_box.label(
-                text="Used by Export > Generate LODs; empty = default "
-                "halving decimate", icon="INFO")
+                text="Row count = LODs made by Export > Generate LODs",
+                icon="INFO")
+            lod_box.label(
+                text="Each row overrides that LOD's format/ratio/"
+                "distance/quality")
             row = lod_box.row()
             row.template_list("RMV2_UL_lod_overrides", "", s,
                               "lod_overrides", s,
