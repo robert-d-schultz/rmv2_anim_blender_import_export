@@ -28,6 +28,16 @@ from .properties import VERTEX_FORMAT_TO_INT
 
 _BONE_PATTERN = re.compile(r"^bone_(\d+)$")
 
+# Every exported material must carry these four texture types; whichever
+# aren't set on the object get these placeholder paths instead, so the
+# game never renders a texture-less (pink/black) material.
+_DEFAULT_TEXTURES = {
+    27: "commontextures/default_base_colour.dds",   # BaseColour
+    29: "commontextures/default_material_map.dds",  # MaterialMap
+    1: "commontextures/default_normal.dds",          # Normal
+    3: "commontextures/test_mask.dds",               # Mask
+}
+
 
 class ExportError(Exception):
     pass
@@ -633,6 +643,10 @@ def _material_from_settings(obj, settings, fmt: int, scale: float,
 
     mat.textures = [(slot.type_as_int(), slot.path)
                     for slot in settings.textures if slot.path]
+    present_types = {ttype for ttype, _ in mat.textures}
+    for ttype, default_path in _DEFAULT_TEXTURES.items():
+        if ttype not in present_types:
+            mat.textures.append((ttype, default_path))
     mat.string_params = [(int(i), str(v))
                          for i, v in extra.get("string_params", [])]
     mat.float_params = [(int(i), float(v))

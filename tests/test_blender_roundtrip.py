@@ -299,8 +299,12 @@ def roundtrip_case(tmpdir, version, vertex_format, label):
               f"lod{li} material id kept")
         check(m_out.material.model_name == m_in.material.model_name,
               f"lod{li} model name kept")
-        check(m_out.material.textures == m_in.material.textures,
-              f"lod{li} textures kept")
+        expected_textures = list(m_in.material.textures) + [
+            (ttype, path) for ttype, path in export_rmv2._DEFAULT_TEXTURES.items()
+            if ttype not in {t for t, _ in m_in.material.textures}]
+        check(m_out.material.textures == expected_textures,
+              f"lod{li} textures kept (plus fallback defaults for unset "
+              "types)")
         check(m_out.material.texture_directory
               == m_in.material.texture_directory,
               f"lod{li} texture dir kept")
@@ -363,6 +367,9 @@ def native_export_case(tmpdir):
           "AUTO material became default_type")
     check(model.mesh.vertex_count > 0 and len(model.mesh.indices) > 0,
           "geometry written")
+    check(dict(model.material.textures) == export_rmv2._DEFAULT_TEXTURES,
+          "a mesh with no textures configured gets all 4 fallback "
+          "defaults on export")
     # sphere of radius 1: positions must stay on the unit sphere
     radii = np.linalg.norm(model.mesh.positions, axis=1)
     check(abs(radii.max() - 1.0) < 5e-3 and abs(radii.min() - 1.0) < 5e-3,
