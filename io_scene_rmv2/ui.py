@@ -476,11 +476,20 @@ CLASSES = (
 )
 
 
+def _draw_setup_lods_menu_item(self, context):
+    self.layout.operator("rmv2.setup_lods", icon="MOD_DECIM")
+
+
 def register():
     for cls in CLASSES:
         bpy.utils.register_class(cls)
+    # Blender 4.0+'s F3 search only indexes operators that appear in an
+    # actual menu, so this must be added to one to be discoverable there
+    # (as well as being directly clickable from the Object menu).
+    bpy.types.VIEW3D_MT_object.append(_draw_setup_lods_menu_item)
 
 
 def unregister():
+    bpy.types.VIEW3D_MT_object.remove(_draw_setup_lods_menu_item)
     for cls in reversed(CLASSES):
         bpy.utils.unregister_class(cls)

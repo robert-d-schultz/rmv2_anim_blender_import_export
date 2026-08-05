@@ -204,8 +204,8 @@ objects.
 the attachment point list (name, bone index, 3×4 rest matrix) on the
 root, camera distance / quality / level on each LOD.
 
-Helper: **F3 → "Setup RMV2 LOD Collections"** builds the collection layout
-from selected meshes.
+Helper: **Object → "Setup RMV2 LOD Collections"** (also findable via
+**F3**) builds the collection layout from selected meshes.
 
 ## Conventions & gotchas
 

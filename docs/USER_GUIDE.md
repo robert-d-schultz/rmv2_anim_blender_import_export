@@ -37,7 +37,7 @@ This is the bit that trips up people used to a flatter Blender scene: the add-on
 
 **[screenshot: outliner showing root + LOD collections]**
 
-If you're building a model from scratch rather than round-tripping an import, set up that same root -> LOD layout first. `F3 -> "Setup RMV2 LOD Collections"` builds it for you from a selection.
+If you're building a model from scratch rather than round-tripping an import, set up that same root -> LOD layout first. Select your mesh(es) and use `Object -> Setup RMV2 LOD Collections` in the 3D viewport (also findable via `F3` search) to build it for you from the selection.
 
 ## Exporting
 
