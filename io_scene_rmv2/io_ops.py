@@ -35,7 +35,9 @@ ANIM_VERSION_ITEMS = [
      "Shogun 2's second layout: no version field, three extra floats per "
      "bone per frame. Only campaign pieces use it - prefer v1"),
     ("1", "Anim v1 (Shogun 2)", "Shogun 2 era"),
-    ("5", "Anim v5", "Rome 2 era"),
+    ("4", "Anim v4", "Rome 2's first version: UTF-16 strings, and every "
+     "bone stored in every frame as float32"),
+    ("5", "Anim v5", "Rome 2 era, and all but 31 of its animations"),
     ("6", "Anim v6", "Attila era"),
     ("7", "Anim v7", "Warhammer 1/2/3 era (the version AssetEditor and "
      "the games' modding pipelines expect)"),

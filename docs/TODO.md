@@ -1,7 +1,7 @@
 # Where this stands, and what's left
 
-Written 2026-08-23, after version 1.13.0 (every format version now
-writes). Roughly in priority order within each group.
+Written 2026-08-23, after version 1.14.0 (Rome 2 read end to end; every
+format version writes). Roughly in priority order within each group.
 
 ## Needs a human
 
@@ -13,8 +13,8 @@ whether the panels make sense.
 
 New UI to look at:
 
-- **Five version pickers**, one per exporter: RMV2 (now includes v5),
-  `.anim` (now includes v8), `.animatable_rigid_model` (v0–v5),
+- **Five version pickers**, one per exporter: RMV2 (v1, v2, v3, v5–v8),
+  `.anim` (v0, v1, v4–v8), `.animatable_rigid_model` (v0–v5),
   `.variant_part_mesh` (v0/v2/v3), `.variant_weighted_mesh`
   (v1/headerless).
 - **"Other Formats" box** on the RMV2 collection panel, showing
@@ -36,12 +36,15 @@ a round trip. **Nothing has ever been loaded by a Total War executable.**
 A single exported unit that renders correctly in Warhammer 3 would
 retire more risk than any amount of further corpus work.
 
-### 3. Commit
+### 3. Merge the branch
 
-32 changed or untracked files, ~5,700 insertions since `76d4e28`. That
-is the entire Shogun 2, Empire/Napoleon, `.variant_weighted_mesh`,
-`.rigid_model_animation` and version-writing effort, unversioned. The
-`samples/` folder is gitignored and stays local.
+Everything since `76d4e28` sits on `pre-rome2-formats-and-all-versions`,
+not on `main`: the Shogun 2, Empire/Napoleon,
+`.variant_weighted_mesh`, `.rigid_model_animation`, version-writing and
+Rome 2 work. Fast-forwarding `main` onto it is a one-liner and your
+call, not this add-on's:
+
+    git checkout main && git merge --ff-only pre-rome2-formats-and-all-versions
 
 ## Investigations
 
@@ -92,10 +95,9 @@ answer most of this quickly.
 
 ## The rest of the series
 
-None of these five are installed with data right now - Attila and
-Warhammer 2 are empty shells, Rome 2 and Pharaoh have a single mod pack
-each, and Troy and Thrones of Britannia are not on disk at all. Each
-item below starts with an install.
+Rome 2 is installed and swept (B below). Attila and Warhammer 2 are
+empty shells, Pharaoh has a single mod pack, and Troy and Thrones of
+Britannia are not on disk at all, so those still start with an install.
 
 ### A. Troy and Pharaoh - forward from Warhammer 3
 
@@ -112,30 +114,52 @@ The two newest, and the two most likely to have moved on:
   layouts are exactly what a later game adds, and all three would show
   up immediately in the survey that Three Kingdoms went through.
 
-### B. Rome 2, Attila and Thrones of Britannia - the unverified middle
+### B. Rome 2 - done, and what it turned up
 
-Higher value than it looks, because this is not new support so much as
-**checking claims already made**. Every corpus swept so far has been
-Shogun 2 (RMV2 v1/v2), Empire and Napoleon (no RMV2 at all), Warhammer 3
-and Three Kingdoms (v7/v8). The versions in between rest on
-TheAssetEditor's C# and this project's own unit tests, never on a
-vanilla file:
+Swept 2026-08-23. Rome 2 was not the formality this entry expected. It
+shipped with **RMV2 v5** and **`.anim` v4**, switched to **v6** and
+**`.anim` v5** during its own run, and kept **RMV2 v3** - Shogun 2's
+layout - for its 3D interface models and some vegetation. Three of
+those five had never been read from a real file.
 
-- **RMV2 v5 has never been read from a real file.** Not one exists in
-  the Warhammer 3 or Three Kingdoms corpora (v8/v7/v6 only). Its write
-  support, added in 1.13.0, was tested by re-versioning a v6 file and
-  round-tripping that - which proves the writer agrees with the reader,
-  and nothing more. Rome 2 is where the real ones are.
-- **`.anim` v6 has never been read from a real file** either. Warhammer
-  3's animations are v8, v7 and v5; Three Kingdoms' are all v7. Attila
-  is the likely source.
-- RMV2 v6 is only thinly covered: 16 files in the Warhammer 3 sample,
-  all campaign skyboxes.
+What landed:
 
-So the order that gets the most out of it is: install Rome 2 first
-(v5 + v6), then Attila (`.anim` v6), then Thrones of Britannia. If any
-of those corpora fails to re-save byte for byte, it is a bug that has
-been shipping quietly.
+- **RMV2 v5 reads and writes properly.** Its every fixed string field is
+  UTF-16 at twice the width - a 256-byte skeleton name, 64-byte model
+  names, 512-byte texture paths, 116-byte attachment points, a 112-byte
+  common header. The v5 write support added in 1.13.0 had been tested
+  only by re-versioning a v6 file, so it agreed with a reader that was
+  wrong about the whole layout. All 295 vanilla v5 files now parse or
+  fail on a material, none silently.
+- **RMV2 v3** is Shogun 2's file layout with v2's material shape; it
+  needed only the version added to the family. 54 of 54 re-save.
+- **`.anim` v4** decoded from scratch: UTF-16 strings, two per-bone
+  bitfields where v5 keeps mapping tables, and frames stored the Shogun
+  2 way - every bone in every frame, float32 quaternions. 31 of 31.
+- **The `.anim` event block** turns out not to be a Shogun 2 exclusive:
+  59 Rome 2 cutscene animations close with one (always empty). They had
+  been failing as "4 unparsed bytes".
+- **Four vertex layouts** decoded: the 60-byte vegetation vertex (trees,
+  shrubs, hedges), the 28-byte tree billboard, the 28-byte grass vertex
+  whose uvs are float32, and the 12-byte position-and-uv one. All
+  import-only, like the other read-only layouts.
+- **Two junk-preservation bugs** shared with every era: the
+  custom-terrain texture path and the per-mesh shader name both keep
+  whatever was in memory after their terminator, and both were being
+  zero-padded on write. 163 terrain tiles and 33 trees stopped
+  re-saving byte-identically the moment those fields were decoded
+  properly - they had been passing for the wrong reason.
+
+Rome 2 now stands at **6012 / 6012 `.anim`** and **10 815 / 14 673
+`.rigid_model_v2`**.
+
+### C. Attila and Thrones of Britannia - next
+
+Attila is the obvious next install: it is the likely source of
+**`.anim` v6**, which has still never been read from a real file
+(Warhammer 3's are v8, v7 and v5; Three Kingdoms' are all v7; Rome 2's
+are v5 and v4). Expect Rome 2's v6 mesh layout to carry over - and
+expect the material gap below to be the limit there too.
 
 ## Known gaps
 
@@ -160,23 +184,46 @@ bug is unreachable and can be documented rather than fixed. Do not flip
 the modern path to bone-local without that evidence — it is shipped
 behaviour, and the modern material's `pivot` field interacts with it.
 
-### 7. Modern meshes this add-on still cannot read
+### 7. Materials with short headers of their own - the one real gap left
 
-Present in both Warhammer 3 and Three Kingdoms, so era-wide rather than
-game-specific:
+Rome 2 made the shape of this clear. Every remaining unreadable mesh,
+in every era, fails the same way: the material id is not one of the
+three this add-on knows (weighted, custom terrain, terrain tiles), so
+the weighted layout is tried and reads off the end of a much shorter
+header. It is a material problem, not a vertex problem.
 
-- decal / UI / terrain-tile meshes that truncate mid-parse (the largest
-  group by far)
-- `CustomTerrain` at stride 60 — tree and vegetation meshes
-- `Position16_bit` at stride 28 — grass
-- one cloth material whose header size does not match
-- vertex format id **12**, which is not in the known enum at all
+The sizes are fixed per id and per era, which is what makes them
+tractable. From Rome 2:
+
+| id | v6 size | v5 size | what |
+| --- | --- | --- | --- |
+| 22 (bow_wave) | 0 | - | no material at all |
+| 48 (terrain tile) | 0 | - | no material at all |
+| 26 (non_renderable) | 80 | - | |
+| 66 (terrain tiles) | 84 | 148 | our struct is 88: Rome 2 has five trailing u32, Warhammer six |
+| 29 / 30 (texture_combo) | 288 | - | the 3D interface banners |
+| 67 (projected_decal) | 260 | 516 | a texture path plus four bytes |
+| 87 (projected_decal_v2) | 292 | - | a texture path plus a vec3 pair |
+| 40 | 544 | - | |
+| 45 (point light) | 524 | 1036 | |
+| 60 (cloth) / 62 (collision_shape) | varies | varies | |
+
+Warhammer 3 has the same classes plus `tree_billboard_material`, and
+one vertex format id, **12**, that is in no enum here.
+
+Two of them are free: a size of 0 means the material is absent, and the
+vertex format then has to come from the stride the way the Shogun 2
+path already does it.
 
 ### 8. Vertex formats that read but do not write
 
-`Collision`, `Position16` and the two custom-terrain layouts, matching
-AssetEditor. Related to 7 but a separate job: 7 is about parsing files at
-all, this is about writing layouts already understood.
+`Collision`, `Position16`, the two custom-terrain layouts, and the four
+Rome 2 vegetation ones (vegetation, tree billboard, grass, position and
+uv). Related to 7 but a separate job: 7 is about parsing files at all,
+this is about writing layouts already understood. Three of the four new
+ones carry per-vertex fields `RmvMeshData` has nowhere to put - a rest
+position and eight halves of wind sway - so they would need somewhere
+to live before a mesh could be rebuilt from Blender.
 
 ### 9. Smaller things
 
@@ -194,6 +241,10 @@ all, this is about writing layouts already understood.
   the only local copy of their reference files. Any further corpus sweep
   for those games needs a reinstall.
 - **`samples/` should grow** as each game above is checked - a couple of
-  files per format per game, the way Empire, Shogun 2, Warhammer 3 and
-  Three Kingdoms are covered now. It is gitignored, so it is only ever
-  as good as the local copy.
+  files per format per game, the way Empire, Shogun 2, Warhammer 3,
+  Three Kingdoms and now Rome 2 are covered. It is gitignored, so it is
+  only ever as good as the local copy.
+- **Rome 2's v3 export path is untested in the game.** v3 goes out
+  through the Shogun 2 writer, which puts vertices in bone space. That
+  is right for Shogun 2 and merely consistent for v3; no v3 file has
+  been round-tripped through Blender and loaded by Rome 2.

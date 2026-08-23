@@ -345,6 +345,172 @@ def make_anim(version=7, frames=3, with_static=False, with_none=False,
     return anim
 
 
+class TestRmv2Version5(unittest.TestCase):
+    """Rome 2's first version writes every fixed-width string as UTF-16 at
+    twice the width.  Field order and count are v6's, so the difference is
+    entirely one of widths and codec."""
+
+    def test_roundtrip(self):
+        rmv = make_file(version=5, vertex_format=rf.VF_WEIGHTED)
+        blob = rf.save(rmv)
+        out = rf.load(blob)
+        self.assertEqual(out.version, 5)
+        self.assertEqual(out.skeleton_name, "humanoid01")
+        mat = out.lods[0].models[0].material
+        self.assertEqual(mat.model_name, "test_mesh")
+        self.assertEqual(mat.texture_directory, "variantmeshes\\test")
+        self.assertEqual(len(mat.textures), 3)
+        self.assertEqual([a.name for a in mat.attachment_points],
+                         ["root", "spine_0"])
+        self.assertEqual(rf.save(out), blob)
+
+    def test_strings_are_utf16(self):
+        blob = rf.save(make_file(version=5, vertex_format=rf.VF_STATIC))
+        self.assertIn("humanoid01".encode("utf-16-le"), blob)
+        self.assertNotIn(b"humanoid01", blob)
+        self.assertIn("test_mesh".encode("utf-16-le"), blob)
+
+    def test_field_widths(self):
+        """The header, common header and material all double."""
+        self.assertEqual(rf._file_header_struct(5).size, 268)
+        self.assertEqual(rf._file_header_struct(6).size, 140)
+        self.assertEqual(rf._common_header_struct(5).size, 112)
+        self.assertEqual(rf._common_header_struct(6).size, 80)
+        self.assertEqual(rf._weighted_material_struct(5).size, 1404)
+        self.assertEqual(rf._weighted_material_struct(6).size, 860)
+        self.assertEqual(rf._attachment_point_struct(5).size, 116)
+        self.assertEqual(rf._texture_struct(5).size, 516)
+
+    def test_v6_is_unaffected(self):
+        blob = rf.save(make_file(version=6, vertex_format=rf.VF_STATIC))
+        self.assertIn(b"humanoid01", blob)
+        self.assertEqual(rf.save(rf.load(blob)), blob)
+
+    def test_a_v5_file_can_be_written_as_v6(self):
+        """Re-versioning across the codec change has to re-encode every
+        string, not copy bytes."""
+        rmv = rf.load(rf.save(make_file(version=5,
+                                        vertex_format=rf.VF_WEIGHTED)))
+        rmv.version = 6
+        out = rf.load(rf.save(rmv))
+        self.assertEqual(out.version, 6)
+        self.assertEqual(out.skeleton_name, "humanoid01")
+        self.assertEqual(out.lods[0].models[0].material.model_name,
+                         "test_mesh")
+
+
+class TestRmv2Version3(unittest.TestCase):
+    """Version 3 is Shogun 2's layout, kept for Rome 2's interface models:
+    no skeleton name in the header, a UTF-16 one after the LOD table, and
+    a material that is a run of fixed-width fields."""
+
+    def test_roundtrip(self):
+        blob = rf.save(make_s2_file(version=3))
+        out = rf.load(blob)
+        self.assertEqual(out.version, 3)
+        self.assertTrue(out.is_shogun2)
+        self.assertEqual(out.skeleton_name, "turtle_ship.anim")
+        self.assertEqual(rf.save(out), blob)
+
+    def test_shader_name_is_kept_like_v2(self):
+        """v1 materials start with the model name; v2 and v3 put a shader
+        name in front of it."""
+        out = rf.load(rf.save(make_s2_file(version=3)))
+        mat = out.lods[0].models[0].material
+        self.assertEqual(mat.shader_name, "rigid_default")
+        self.assertEqual(mat.model_name, "hull")
+
+
+class TestRome2VertexLayouts(unittest.TestCase):
+    """The four layouts Rome 2's vegetation and water use.  All are
+    import-only: three carry per-vertex fields RmvMeshData cannot hold."""
+
+    LAYOUTS = {rf.VF_VEGETATION: 60, rf.VF_TREE_BILLBOARD: 28,
+               rf.VF_GRASS: 28, rf.VF_POSITION_UV: 12}
+
+    def test_strides(self):
+        for fmt, stride in self.LAYOUTS.items():
+            with self.subTest(fmt=rf.VERTEX_FORMAT_NAMES[fmt]):
+                self.assertEqual(rf.vertex_stride(fmt, 6), stride)
+
+    def test_declared_format_pairs_are_unambiguous(self):
+        """Three different layouts come in at 28 bytes, so the declared
+        format has to be part of the key."""
+        self.assertEqual(
+            rf._FORMAT_BY_DECLARED_STRIDE[(rf.VF_POSITION16, 28)],
+            rf.VF_GRASS)
+        self.assertEqual(
+            rf._FORMAT_BY_DECLARED_STRIDE[(rf.VF_ROME2_TREE, 28)],
+            rf.VF_TREE_BILLBOARD)
+        self.assertEqual(rf.vertex_stride(rf.VF_WEIGHTED, 6), 28)
+
+    def test_decode_reads_the_geometry(self):
+        """A hand-built vegetation block: the position is the second
+        half4, not the first."""
+        dt = rf._vertex_dtype(rf.VF_VEGETATION, 6)
+        raw = np.zeros(2, dt)
+        raw["pos"][:, 0:3] = [[1.0, 2.0, 3.0], [-1.0, -2.0, -3.0]]
+        raw["pos"][:, 3] = 1.0
+        raw["pivot"][:, 0:3] = 9.0
+        raw["normal"][:, 0:3] = [[0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
+        raw["uv"] = [[0.25, 0.5], [0.75, 1.0]]
+        blob = raw.tobytes()
+        mesh = rf.decode_vertices(blob, 0, 2, 60, rf.VF_VEGETATION, 6)
+        np.testing.assert_allclose(mesh.positions,
+                                   [[1.0, 2.0, 3.0], [-1.0, -2.0, -3.0]])
+        np.testing.assert_allclose(mesh.normals,
+                                   [[0.0, 1.0, 0.0], [0.0, 0.0, 1.0]])
+        np.testing.assert_allclose(mesh.uv0, [[0.25, 0.5], [0.75, 1.0]])
+        # unmodified, it goes back out as the bytes it came in as
+        self.assertEqual(rf.encode_vertices(mesh, rf.VF_VEGETATION, 6), blob)
+
+    def test_writing_from_scratch_is_refused(self):
+        mesh = make_cube_mesh(0)
+        for fmt in (rf.VF_VEGETATION, rf.VF_TREE_BILLBOARD, rf.VF_GRASS):
+            with self.subTest(fmt=rf.VERTEX_FORMAT_NAMES[fmt]):
+                with self.assertRaises(rf.RmvFormatError):
+                    rf.encode_vertices(mesh, fmt, 6)
+
+
+class TestFixedFieldJunk(unittest.TestCase):
+    """CA's fixed-width fields often keep bytes of whatever they last held
+    after the terminator.  Re-padding them with zeros loses data that is
+    in the file, so an unedited field goes back verbatim."""
+
+    def stamped(self):
+        """A v6 file with a junk byte after the shader name's terminator,
+        the way Rome 2's tree billboards ship."""
+        blob = bytearray(rf.save(make_file(version=6,
+                                           vertex_format=rf.VF_STATIC)))
+        at = blob.index(rf.DEFAULT_SHADER_NAME.encode())
+        blob[at + len(rf.DEFAULT_SHADER_NAME) + 1] = 0x18
+        return bytes(blob), at
+
+    def test_shader_name_junk_survives(self):
+        blob, _ = self.stamped()
+        model = rf.load(blob)
+        self.assertEqual(model.lods[0].models[0].shader_name,
+                         rf.DEFAULT_SHADER_NAME)
+        self.assertEqual(rf.save(model), blob)
+
+    def test_editing_the_name_drops_the_junk(self):
+        blob, at = self.stamped()
+        model = rf.load(blob)
+        for lod in model.lods:
+            for m in lod.models:
+                m.shader_name = "custom"
+        out = rf.save(model)
+        self.assertNotIn(bytes([0x18]), out[at:at + 12])
+
+    def test_custom_terrain_path_junk_survives(self):
+        mat = rf.CustomTerrainMaterial(texture_path="terrain/tile")
+        blob = bytearray(mat.write())
+        blob[len("terrain/tile") + 2] = 0x7A
+        again = rf.CustomTerrainMaterial.parse(bytes(blob), 0)
+        self.assertEqual(again.texture_path, "terrain/tile")
+        self.assertEqual(again.write(), bytes(blob))
+
+
 class TestAnimRoundtrip(unittest.TestCase):
     def check(self, version, **kwargs):
         anim = make_anim(version=version, **kwargs)
@@ -391,16 +557,8 @@ class TestAnimRoundtrip(unittest.TestCase):
     def test_v5(self):
         self.check(5)
 
-    def test_v4_rejected(self):
-        """Real v4 files use UTF-16 strings and a different body layout,
-        so they are cleanly refused rather than misparsed."""
-        blob = af.save(make_anim(version=7))
-        with self.assertRaises(af.AnimFormatError):
-            af.load(struct.pack("<I", 4) + blob[4:])
-        anim = make_anim(version=7)
-        anim.version = 4
-        with self.assertRaises(af.AnimFormatError):
-            af.save(anim)
+    def test_v4(self):
+        self.check(4)
 
     def test_single_frame_skeleton(self):
         """Skeleton files are one-frame animations."""
@@ -908,6 +1066,60 @@ class TestAnimV8Writing(unittest.TestCase):
             af.save(anim)
 
 
+class TestAnimV4(unittest.TestCase):
+    """Rome 2's original .anim layout: UTF-16 strings, two per-bone
+    bitfields where v5 keeps its mapping tables, and float32 quaternions
+    stored per bone rather than as separate channel blocks."""
+
+    def test_strings_are_utf16(self):
+        blob = af.save(make_anim(version=4))
+        self.assertIn("humanoid01".encode("utf-16-le"), blob)
+        self.assertNotIn(b"humanoid01", blob)
+        # a character count, not a byte count
+        at = blob.index("humanoid01".encode("utf-16-le")) - 2
+        self.assertEqual(struct.unpack_from("<H", blob, at)[0], 10)
+
+    def test_flags_default_to_all_set(self):
+        anim = af.load(af.save(make_anim(version=4)))
+        part = anim.parts[0]
+        self.assertEqual(list(part.translation_flags), [True] * 4)
+        self.assertEqual(list(part.rotation_flags), [True] * 4)
+
+    def test_flags_survive_a_roundtrip(self):
+        anim = make_anim(version=4)
+        anim.parts[0].translation_flags = np.array([True, False, False,
+                                                    True])
+        anim.parts[0].rotation_flags = np.array([False, True, True, False])
+        out = af.load(af.save(anim))
+        self.assertEqual(list(out.parts[0].translation_flags),
+                         [True, False, False, True])
+        self.assertEqual(list(out.parts[0].rotation_flags),
+                         [False, True, True, False])
+        self.assertEqual(af.save(out), af.save(anim))
+
+    def test_quaternions_are_float32(self):
+        """v5 quantizes to int16; v4 does not, so a value that int16
+        cannot hold survives here and would not there."""
+        anim = make_anim(version=4)
+        anim.parts[0].dynamic_frames[0].rotations = np.array(
+            [[0.1234567, 0.0, 0.0, 0.9], [0.0, 0.0, 0.0, 1.0],
+             [0.0, 0.0, 0.0, 1.0], [0.0, 0.0, 0.0, 1.0]], np.float32)
+        out = af.load(af.save(anim))
+        self.assertAlmostEqual(
+            float(out.parts[0].dynamic_frames[0].rotations[0][0]),
+            0.1234567, places=6)
+
+    def test_static_and_unmapped_bones_are_refused(self):
+        """A v4 file stores every bone in every frame, so there is nowhere
+        to put a static or unmapped one."""
+        for kwargs in ({"with_static": True}, {"with_none": True}):
+            with self.subTest(**kwargs):
+                anim = make_anim(version=7, **kwargs)
+                anim.version = 4
+                with self.assertRaises(af.AnimFormatError):
+                    af.save(anim)
+
+
 class TestAnimV8Precision(unittest.TestCase):
     """A version 8 byte decodes as `base + (byte / 127) * scale`.  Where
     the base dwarfs the scale, one byte step is finer than float32
@@ -1123,7 +1335,7 @@ def make_s2_material(version, textures=2, bone_index=1, model_name="hull",
     so the test exercises the real byte layout rather than the dataclass.
     """
     blob = bytearray()
-    if version == 2:
+    if version >= 2:            # v1 has no shader name; v2 and v3 do
         blob += rf._encode_fixed_utf16(shader_name, rf._S2_STR32)
     blob += rf._encode_fixed_utf16(model_name, rf._S2_STR32)
     for i in range(textures):

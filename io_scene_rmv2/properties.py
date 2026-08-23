@@ -122,9 +122,11 @@ ALPHA_MODE_ITEMS = [
 VERSION_ITEMS = [
     ("1", "RMV2 v1", "Shogun 2 era (no shader name per mesh)"),
     ("2", "RMV2 v2", "Shogun 2 era"),
-    ("5", "RMV2 v5", "Rome 2 era - AssetEditor reads this but will not "
-     "write it"),
-    ("6", "RMV2 v6", "Rome 2 / Attila era"),
+    ("3", "RMV2 v3", "Rome 2's 3D user-interface models, and the last "
+     "version to use the Shogun 2 layout"),
+    ("5", "RMV2 v5", "Rome 2's first version: UTF-16 strings throughout. "
+     "AssetEditor reads this but will not write it"),
+    ("6", "RMV2 v6", "Rome 2 / Attila era, and the bulk of Rome 2"),
     ("7", "RMV2 v7", "Warhammer 1 & 2 era"),
     ("8", "RMV2 v8", "Warhammer 3 / Troy era (vertex colours). Two out of "
      "three Warhammer 3 meshes are this version"),
@@ -146,10 +148,11 @@ VWM_VERSION_ITEMS = [
      "unit meshes use it"),
 ]
 
-# The Shogun 2 versions use a completely different header, material and
-# vertex layout to 5-8; a model cannot simply be re-versioned across the
-# divide (see rmv2_format._save_shogun2).
-SHOGUN2_VERSION_IDS = {"1", "2"}
+# Versions 1 to 3 use a completely different header, material and vertex
+# layout to 5-8; a model cannot simply be re-versioned across the divide
+# (see rmv2_format._save_shogun2).  3 is Rome 2's, the other two Shogun
+# 2's.
+SHOGUN2_VERSION_IDS = {"1", "2", "3"}
 
 
 # ---------------------------------------------------------------------------

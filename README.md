@@ -18,9 +18,9 @@ else here is built against.
 
 | Format | Games | Import | Export |
 | --- | --- | --- | --- |
-| `.rigid_model_v2` | Rome 2 → Warhammer 3 | v5, v6, v7, v8 | v6, v7, v8 |
-| `.rigid_model_v2` | Shogun 2 | v1, v2 | v1, v2 |
-| `.anim` | Rome 2 → Warhammer 3 | v5, v6, v7, v8 | same |
+| `.rigid_model_v2` | Rome 2 → Warhammer 3 | v5, v6, v7, v8 | same |
+| `.rigid_model_v2` | Shogun 2, and Rome 2's UI models | v1, v2, v3 | same |
+| `.anim` | Rome 2 → Warhammer 3 | v4, v5, v6, v7, v8 | same |
 | `.anim` | Shogun 2 / Empire / Napoleon | v1 + a headerless variant | same |
 | `.animatable_rigid_model` | Shogun 2 / Empire / Napoleon | v0–v5 | same |
 | `.rigid_model` | Empire / Napoleon / Shogun 2 | v0–v5 | same |
@@ -30,7 +30,9 @@ else here is built against.
 
 **Every version in that table reads *and* writes**, including the ones
 AssetEditor will not write: `.anim` v8, whose per-bone packing is
-reproduced rather than approximated, and RMV2 v5. The exporter offers
+reproduced rather than approximated, and RMV2 v5 — nor the two versions
+Rome 2 shipped with and dropped during its own run, RMV2 v3 and `.anim`
+v4, which are in no reference this project knows of. The exporter offers
 the whole list, so a model imported from one game can be written for
 another — pick "Anim v1 (Shogun 2)" or "Version 1 (Empire/Napoleon)" and
 that is what lands on disk.
@@ -46,8 +48,9 @@ the export says what it dropped rather than refusing.
 **Per mesh** you get positions, custom split normals, the full tangent
 basis, both UV channels, vertex colours and bone weights. *Static*,
 *Weighted* (2 bone influences) and *Cinematic* (4) are read and written;
-collision, `Position16` and the two custom-terrain layouts are
-import-only, matching AssetEditor.
+collision, `Position16`, the two custom-terrain layouts and the four
+vegetation layouts (trees, their billboards, grass, and the plain
+position-and-uv one water planes use) are import-only.
 
 **Round-trip fidelity.** Re-saving an unmodified file byte-for-byte is a
 tested invariant, checked against every file the games ship:
@@ -63,6 +66,8 @@ tested invariant, checked against every file the games ship:
 | `.rigid_model_animation` | 725 / 725 (Empire), 784 / 784 (Napoleon) |
 | Warhammer 3 `.anim` v5–v7 | 8368 / 8368 |
 | Warhammer 3 `.anim` v8 | 6651 / 6651 sampled |
+| Rome 2 `.anim` | 6012 / 6012 — every one, v4 and v5 |
+| Rome 2 `.rigid_model_v2` | 10 815 / 14 673 — v3 whole, the rest limited by materials this add-on has not decoded |
 
 Version 8 nearly did not make that bar, and the reason is worth knowing.
 Its byte-packed channels decode as `base + (byte / 127) × scale`, and
@@ -85,6 +90,21 @@ assumed constant:
   keeps the extreme and still guards the overflow.
 - A part holding its pose entirely in the static frame follows it with
   `duration × fps + 1`, not the 3 it usually reads as.
+
+Rome 2 turned out to be two games in one. It shipped with **RMV2 v5**
+and **`.anim` v4**, both of which write every fixed-width string as
+UTF-16 at twice the width, then switched mid-life to v6 and v5, which
+are the same layouts in UTF-8 — the switch this add-on had only ever
+seen from the far side. Version 4 goes further back still: it keeps
+frames the way Shogun 2 does, every bone in every frame as float32,
+with two per-bone bitfields where v5 keeps its mapping tables. And v3,
+the version Rome 2's 3D interface models use, is not a Rome 2 layout at
+all — it is Shogun 2's, carried forward one release.
+
+What still does not read is a group of materials with short fixed
+headers of their own — decals, terrain tiles, bow waves, point lights,
+cloth — which Rome 2's terrain and campaign packs are full of. They are
+the same class of gap Warhammer 3 has, just far more numerous here.
 
 That is **every** Empire and Napoleon file of every supported format,
 with one exclusion: Empire's 224 **Elite Units DLC**

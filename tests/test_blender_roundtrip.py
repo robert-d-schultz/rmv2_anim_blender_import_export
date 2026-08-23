@@ -2702,6 +2702,9 @@ def main():
         roundtrip_case(tmpdir, 7, rf.VF_WEIGHTED, "weighted")
         roundtrip_case(tmpdir, 6, rf.VF_STATIC, "static")
         roundtrip_case(tmpdir, 8, rf.VF_STATIC, "static_v8")
+        # Rome 2's first version, whose strings are UTF-16 at twice the
+        # width - the whole export path has to agree about that.
+        roundtrip_case(tmpdir, 5, rf.VF_WEIGHTED, "weighted_v5")
         native_export_case(tmpdir)
         default_textures_case()
         auto_lod_case(tmpdir)
