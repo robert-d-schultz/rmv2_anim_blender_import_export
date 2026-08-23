@@ -90,6 +90,53 @@ has never been reviewed is whether it is *right*:
 A visual comparison against the same unit in AssetEditor's viewer would
 answer most of this quickly.
 
+## The rest of the series
+
+None of these five are installed with data right now - Attila and
+Warhammer 2 are empty shells, Rome 2 and Pharaoh have a single mod pack
+each, and Troy and Thrones of Britannia are not on disk at all. Each
+item below starts with an install.
+
+### A. Troy and Pharaoh - forward from Warhammer 3
+
+The two newest, and the two most likely to have moved on:
+
+- **Pharaoh ships PFH6 packs.** Every reader here handles PFH0 through
+  PFH5; 6 is unread. RPFM has `pfh6.rs` to work from. Expect the same
+  per-entry compression flag PFH5 uses, but that is an assumption.
+- Troy is the era the README already attributes RMV2 v8 to ("Warhammer
+  3 / Troy era"), which has never actually been checked against a Troy
+  file.
+- Both are worth a version and vertex-format census before anything
+  else: new `TextureType` values, new material types, and new vertex
+  layouts are exactly what a later game adds, and all three would show
+  up immediately in the survey that Three Kingdoms went through.
+
+### B. Rome 2, Attila and Thrones of Britannia - the unverified middle
+
+Higher value than it looks, because this is not new support so much as
+**checking claims already made**. Every corpus swept so far has been
+Shogun 2 (RMV2 v1/v2), Empire and Napoleon (no RMV2 at all), Warhammer 3
+and Three Kingdoms (v7/v8). The versions in between rest on
+TheAssetEditor's C# and this project's own unit tests, never on a
+vanilla file:
+
+- **RMV2 v5 has never been read from a real file.** Not one exists in
+  the Warhammer 3 or Three Kingdoms corpora (v8/v7/v6 only). Its write
+  support, added in 1.13.0, was tested by re-versioning a v6 file and
+  round-tripping that - which proves the writer agrees with the reader,
+  and nothing more. Rome 2 is where the real ones are.
+- **`.anim` v6 has never been read from a real file** either. Warhammer
+  3's animations are v8, v7 and v5; Three Kingdoms' are all v7. Attila
+  is the likely source.
+- RMV2 v6 is only thinly covered: 16 files in the Warhammer 3 sample,
+  all campaign skyboxes.
+
+So the order that gets the most out of it is: install Rome 2 first
+(v5 + v6), then Attila (`.anim` v6), then Thrones of Britannia. If any
+of those corpora fails to re-save byte for byte, it is a bug that has
+been shipping quietly.
+
 ## Known gaps
 
 ### 6. `matrix_index` may double-apply the bone (WH3-era) — unconfirmed
@@ -146,3 +193,7 @@ all, this is about writing layouts already understood.
 - **Empire, Napoleon and Shogun 2 are uninstalled**, so `samples/` is now
   the only local copy of their reference files. Any further corpus sweep
   for those games needs a reinstall.
+- **`samples/` should grow** as each game above is checked - a couple of
+  files per format per game, the way Empire, Shogun 2, Warhammer 3 and
+  Three Kingdoms are covered now. It is gitignored, so it is only ever
+  as good as the local copy.
