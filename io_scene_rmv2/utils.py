@@ -42,6 +42,13 @@ import numpy as np
 _G2B_SIGN = np.array([-1.0, -1.0, 1.0], dtype=np.float32)
 _B2G_SIGN = np.array([-1.0, 1.0, -1.0], dtype=np.float32)
 
+# The same map as a 3x3, for code that has to conjugate a whole matrix by
+# it rather than transform points (bind poses, attachment transforms).
+# It is orthogonal, so its transpose is its inverse.
+GAME_TO_BLENDER_M3 = np.array([[-1.0, 0.0, 0.0],
+                               [0.0, 0.0, -1.0],
+                               [0.0, 1.0, 0.0]], dtype=np.float32)
+
 
 def game_to_blender(arr: np.ndarray) -> np.ndarray:
     """(n,3) game-space -> (n,3) Blender-space (positions or directions)."""

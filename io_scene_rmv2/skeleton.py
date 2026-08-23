@@ -9,7 +9,10 @@ hand (or by other add-ons) fall back to Blender's bone order.
 
 from __future__ import annotations
 
+import numpy as np
 from mathutils import Matrix, Quaternion
+
+from . import utils
 
 BONE_INDEX_PROP = "rmv2_bone_index"
 BONE_FIX_QUAT_PROP = "rmv2_bone_fix_quat"
@@ -71,6 +74,30 @@ def bone_fix_quaternion(bone) -> Quaternion:
     if raw is None:
         return Quaternion()
     return Quaternion(tuple(raw))
+
+
+def bind_frames_in_game_space(armature_obj, scale: float = 1.0) -> dict:
+    """{file bone index: 4x4 game-space bind matrix}.
+
+    The rest pose as the file's own coordinates see it, which is what a
+    format storing vertices in bone space needs (see vmpf_format).
+
+    Undoes the cosmetic rest-orientation fix the .anim importer applies
+    (`bone_fix_quaternion`), because that fix is a visual-only local
+    rotation and skinning must not see it.  Translations are divided by
+    `scale` so a caller that multiplies its finished positions by the
+    same scale puts the bones back exactly where the armature has them.
+    """
+    conv = utils.GAME_TO_BLENDER_M3
+    frames = {}
+    for index, bone in bone_index_pairs(armature_obj):
+        fix = bone_fix_quaternion(bone).to_matrix().to_4x4()
+        rest = np.array(bone.matrix_local @ fix.inverted(), np.float32)
+        game = np.eye(4, dtype=np.float32)
+        game[:3, :3] = conv.T @ rest[:3, :3] @ conv
+        game[:3, 3] = conv.T @ rest[:3, 3] / (scale or 1.0)
+        frames[index] = game
+    return frames
 
 
 def find_context_armature(context):

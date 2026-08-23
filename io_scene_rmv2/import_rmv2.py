@@ -37,7 +37,9 @@ import numpy as np
 from mathutils import Matrix
 
 from . import materials as rmv2_materials
+from . import mesh_build
 from . import rmv2_format as rf
+from . import scene_layout
 from . import skeleton
 from . import utils
 from .properties import VERTEX_FORMAT_FROM_INT
@@ -46,54 +48,6 @@ from .properties import VERTEX_FORMAT_FROM_INT
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-def _set_custom_normals(me, normals_b: np.ndarray):
-    if np.allclose(normals_b, 0.0):
-        return
-    normals = utils.normalize_rows(normals_b, fallback=(0.0, 0.0, 0.0))
-    if hasattr(me, "use_auto_smooth"):      # Blender <= 4.0
-        me.use_auto_smooth = True
-    me.normals_split_custom_set_from_vertices(normals.tolist())
-
-
-def _add_uv_layer(me, name: str, per_vertex_uv: np.ndarray,
-                  loop_vidx: np.ndarray):
-    layer = me.uv_layers.new(name=name, do_init=False)
-    if layer is None:      # exceeded max uv layers
-        return
-    layer.data.foreach_set("uv",
-                           per_vertex_uv[loop_vidx].ravel().astype(np.float32))
-
-
-def _add_colour_attribute(me, colours: np.ndarray):
-    ca = me.color_attributes.new(name="Colour", type="BYTE_COLOR",
-                                 domain="POINT")
-    flat = np.clip(colours, 0.0, 1.0).ravel().astype(np.float32)
-    try:
-        ca.data.foreach_set("color_srgb", flat)
-    except (AttributeError, TypeError):
-        ca.data.foreach_set("color", flat)
-
-
-def _add_vertex_groups(obj, mesh: rf.RmvMeshData, bone_names: dict):
-    k = mesh.bone_weights.shape[1] if mesh.bone_weights.ndim == 2 else 0
-    if not k or mesh.vertex_count == 0:
-        return
-    idx = mesh.bone_indices
-    wgt = mesh.bone_weights
-    used = np.unique(idx[wgt > 0.0])
-    for bone in used.tolist():
-        name = bone_names.get(bone, f"bone_{bone}")
-        group = obj.vertex_groups.new(name=name)
-        # A bone can appear in several influence slots of one vertex; sum.
-        wsum = np.where(idx == bone, wgt, 0.0).sum(axis=1)
-        verts = np.nonzero(wsum > 0.0)[0]
-        weights = wsum[verts]
-        # Weights are byte-quantized, so batching identical values is cheap.
-        for value in np.unique(weights):
-            vs = verts[weights == value]
-            group.add(vs.tolist(), float(value), "REPLACE")
-
 
 def _material_has_colour(fmt: int, version: int) -> bool:
     if fmt == rf.VF_STATIC or fmt == rf.VF_CUSTOM_TERRAIN2:
@@ -131,6 +85,14 @@ def _build_extra_json(material, model) -> str:
         if material.vec4_params:
             extra["vec4_params"] = [[i, list(v)]
                                     for i, v in material.vec4_params]
+    elif isinstance(material, rf.Shogun2Material):
+        # A Shogun 2 material is a run of fixed-width fields whose exact
+        # composition depends on the material id, and several ids have
+        # trailing bytes we do not understand. Keeping the block verbatim
+        # means those survive a Blender round-trip; export patches the
+        # fields the user can actually edit back into it.
+        extra["s2_material_raw"] = _bytes_to_hex(material.raw)
+        extra["s2_material_version"] = material.version
     if any(model.shader_extra):
         extra["shader_extra"] = _bytes_to_hex(model.shader_extra)
     if any(model.shader_zero):
@@ -176,7 +138,6 @@ def _build_mesh_object(model, version: int, name: str, scale: float,
     mesh_data = model.mesh
     material = model.material
 
-    me = bpy.data.meshes.new(name)
     n = mesh_data.vertex_count
 
     # File positions are pivot-relative: the game renders raw + pivot
@@ -187,46 +148,29 @@ def _build_mesh_object(model, version: int, name: str, scale: float,
         utils.game_to_blender_v(material.pivot), np.float32) * scale
     pos_b = utils.game_to_blender(mesh_data.positions) * scale
 
-    me.vertices.add(n)
-    me.vertices.foreach_set("co", pos_b.ravel())
-
     # The game->Blender map is a reflection (det -1), so winding must be
     # reversed once to keep faces front-facing (see utils.py).
-    tris = utils.reverse_winding(
-        mesh_data.indices.reshape(-1, 3)).astype(np.int32)
-    nloops = tris.size
-    me.loops.add(nloops)
-    me.loops.foreach_set("vertex_index", tris.ravel())
-    npolys = len(tris)
-    me.polygons.add(npolys)
-    me.polygons.foreach_set("loop_start",
-                            np.arange(0, nloops, 3, dtype=np.int32))
-    me.validate(verbose=False, clean_customdata=False)
-
-    if len(me.polygons):
-        me.polygons.foreach_set("use_smooth",
-                                np.ones(len(me.polygons), dtype=np.int8))
-
-    # Per-loop attributes are gathered through the *actual* loop->vertex
-    # mapping, so they stay correct even if validate() dropped bad faces.
-    loop_vidx = np.empty(len(me.loops), np.int32)
-    me.loops.foreach_get("vertex_index", loop_vidx)
+    tris = utils.reverse_winding(mesh_data.indices.reshape(-1, 3))
+    me, loop_vidx = mesh_build.build_mesh(name, pos_b, tris)
 
     if n:
-        _add_uv_layer(me, "UVMap", utils.flip_uv_v(mesh_data.uv0), loop_vidx)
+        mesh_build.add_uv_layer(me, "UVMap", utils.flip_uv_v(mesh_data.uv0),
+                                loop_vidx)
         if mesh_data.raw_format == rf.VF_STATIC:
-            _add_uv_layer(me, "UVMap_1", utils.flip_uv_v(mesh_data.uv1),
-                          loop_vidx)
+            mesh_build.add_uv_layer(me, "UVMap_1",
+                                    utils.flip_uv_v(mesh_data.uv1), loop_vidx)
         if _material_has_colour(mesh_data.raw_format, version):
-            _add_colour_attribute(me, mesh_data.colours)
-        _set_custom_normals(me, utils.game_to_blender(mesh_data.normals))
+            mesh_build.add_colour_attribute(me, mesh_data.colours)
+        mesh_build.set_custom_normals(
+            me, utils.game_to_blender(mesh_data.normals))
 
     me.update()
 
     obj = bpy.data.objects.new(name, me)
     obj.location = pivot_b.tolist()
 
-    _add_vertex_groups(obj, mesh_data, bone_names)
+    mesh_build.add_vertex_groups(obj, mesh_data.bone_indices,
+                                 mesh_data.bone_weights, bone_names)
     _fill_object_settings(obj, model, material)
 
     if options.get("build_materials", True):
@@ -250,29 +194,6 @@ def _attach_matrix_to_blender(matrix12, scale: float) -> Matrix:
     return out
 
 
-def _find_layer_collection(layer_collection, collection):
-    if layer_collection.collection == collection:
-        return layer_collection
-    for child in layer_collection.children:
-        found = _find_layer_collection(child, collection)
-        if found is not None:
-            return found
-    return None
-
-
-def _show_only_most_detailed_lod(context, lod_collections: list):
-    """Hide every LOD collection but the most detailed one (index 0) in the
-    current view layer, so the viewport isn't cluttered with overlapping
-    LODs right after import. Reversible via the outliner's eye icon."""
-    if len(lod_collections) < 2:
-        return
-    root_layer_col = context.view_layer.layer_collection
-    for col in lod_collections[1:]:
-        layer_col = _find_layer_collection(root_layer_col, col)
-        if layer_col is not None:
-            layer_col.hide_viewport = True
-
-
 def _collect_attach_points(rmv: rf.RmvFile):
     """First non-empty attachment point list in the file (they are repeated
     per mesh and normally identical)."""
@@ -288,16 +209,6 @@ def _collect_attach_points(rmv: rf.RmvFile):
 # Entry point
 # ---------------------------------------------------------------------------
 
-def _adopt_armature(root, armature):
-    """Move an existing armature into the model's root collection so the
-    skeleton travels with the model it now drives.  Links into other RMV2
-    roots are kept - one skeleton may serve several imported models."""
-    for col in list(armature.users_collection):
-        if not col.rmv2.is_rmv2_root:
-            col.objects.unlink(armature)
-    root.objects.link(armature)
-
-
 def import_file(context, filepath: str, options: dict):
     """Import one .rigid_model_v2 file. Returns (root_collection, stats)."""
     with open(filepath, "rb") as handle:
@@ -307,12 +218,9 @@ def import_file(context, filepath: str, options: dict):
     stem = os.path.splitext(os.path.basename(filepath))[0]
     scale = options.get("global_scale", 1.0)
 
-    root = bpy.data.collections.new(stem)
-    context.scene.collection.children.link(root)
-    root.rmv2.is_rmv2_root = True
-    if str(rmv.version) in {"6", "7", "8"}:
+    root = scene_layout.new_root(context, stem, rmv.skeleton_name)
+    if str(rmv.version) in {"1", "2", "6", "7", "8"}:
         root.rmv2.version = str(rmv.version)
-    root.rmv2.skeleton_name = rmv.skeleton_name
 
     # An already-selected armature (e.g. from a .anim import) supplies the
     # bone names and the meshes get attached to it below. Without one,
@@ -323,7 +231,7 @@ def import_file(context, filepath: str, options: dict):
     if options.get("attach_armature", True):
         armature = skeleton.find_context_armature(context)
     if armature is not None:
-        _adopt_armature(root, armature)
+        scene_layout.adopt_armature(root, armature)
 
     # A "building" armature's meshes are destructible-building pieces:
     # rigid, matrix_index-driven, never truly bone-weighted, even though
@@ -353,7 +261,13 @@ def import_file(context, filepath: str, options: dict):
     # matrix_index wouldn't mean this) too, each unweighted mesh gets
     # rigidly constrained to that bone below (skeleton.attach_to_bone)
     # instead of the normal vertex-group-based attach.
+    #
+    # Shogun 2 works this way for everything: it has no per-vertex
+    # skinning at all, so every mesh is welded to the single bone its
+    # material names, and its vertices are stored in that bone's space.
     attach_by_matrix_index = (
+        armature is not None and rmv.version in rf.SHOGUN2_VERSIONS
+    ) or (
         armature_is_building
         and rmv.skeleton_name.strip().lower() in ("", "building"))
     for ap in attach_points:
@@ -369,11 +283,10 @@ def import_file(context, filepath: str, options: dict):
     stats = {"lods": 0, "meshes": 0, "vertices": 0, "triangles": 0}
     lod_collections = []
     for lod_index, lod in enumerate(lods):
-        col = bpy.data.collections.new(f"{stem}_lod{lod_index}")
-        root.children.link(col)
-        lod_collections.append(col)
-        col.rmv2.is_lod = True
-        col.rmv2.lod_level = lod.lod_level if rmv.version >= 7 else lod_index
+        col = scene_layout.new_lod(
+            root, f"{stem}_lod{lod_index}",
+            lod.lod_level if rmv.version >= 7 else lod_index)
+        lod_collections.append((lod_index, col))
         col.rmv2.camera_distance = lod.camera_distance
         col.rmv2.quality_level = lod.quality_level
         stats["lods"] += 1
@@ -396,7 +309,7 @@ def import_file(context, filepath: str, options: dict):
             stats["vertices"] += model.mesh.vertex_count
             stats["triangles"] += len(model.mesh.indices) // 3
 
-    _show_only_most_detailed_lod(context, lod_collections)
+    scene_layout.show_only_most_detailed_lod(context, lod_collections)
 
     if options.get("create_attach_empties", False) and attach_points:
         ap_col = bpy.data.collections.new(f"{stem}_attach")

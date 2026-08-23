@@ -1,3 +1,5 @@
 __pycache__/
 *.pyc
 *.zip
+# Reference files extracted from the games - CA's assets, local only.
+samples/

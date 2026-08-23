@@ -7,7 +7,8 @@ dependencies so it can be unit-tested with a plain Python interpreter.
 The implementation follows the C# reference in
 TheAssetEditor/Shared/GameFiles/Animation/AnimationFile.cs:
 
-    header      version (u32), always-one (u32), frame rate (f32),
+    header      version (u32), a type word (u32, see header_type),
+                frame rate (f32),
                 skeleton name (u16-length + utf8),
                 v7+: flag count (u32) + flag strings,
                 total playtime in seconds (f32)
@@ -25,12 +26,45 @@ xyzw quaternions stored as 4 int16 (value / 32767).  A bone mapping value
 of -1 means "no data, use the skeleton's bind pose", 0..9999 indexes into
 each dynamic frame and >= 10000 indexes into the static frame (minus 10000).
 Versions 5 and 6 have exactly one part and no static frame; version 8
-splits the data into parts with per-bone bit-rate compression (read-only
-here, same as AssetEditor).
+splits the data into parts, each packing its channels at a per-bone rate
+(see AnimPart's rate fields).  AssetEditor reads v8 but will not write
+it; this module does both.
 
 Skeleton files (animations/skeletons/*.anim) are ordinary .anim files
 carrying a few identical copies of the bind pose as dynamic frames -
 they are structurally indistinguishable from short animations.
+
+Version 1 (Shogun 2) predates all of that and has its own, much simpler
+layout.  It is not described by AssetEditor - it was reverse-engineered
+from real files (see tests/data) and cross-checked against the user's
+standalone Shogun 2 scripts:
+
+    header      version (u32, always 1), frame rate (f32),
+                total playtime in seconds (f32)
+    bones       count (u32), then per bone: name (u16 *character* count +
+                UTF-16LE), parent index (i32, -1 = root)
+    frames      count (u32), then count * bone_count * 28 bytes:
+                a float32 vec3 translation followed by an xyzw
+                float32 quaternion, for every bone, in bone order
+    events      count (u32), then per event: string count (u32) followed
+                by that many UTF-16LE strings
+
+Every bone is animated in every frame, so v1 has no mapping tables, no
+static frame and no parts; it is loaded into the same data model with a
+single part whose mappings are all dynamic.  Note that v1 stores strings
+as UTF-16 with a *character* count, where v5+ uses UTF-8 with a *byte*
+count, and stores quaternions as full float32 rather than int16.
+
+A minority of Shogun 2 files (campaign pieces, a few reference skeletons)
+use a second, headerless variant with no version field at all: they begin
+at the frame rate, and each bone carries ten floats per frame rather than
+seven - the extra three are 0.001 in every file seen and their purpose is
+unknown.  They are given the synthetic version number 0, which is never
+written to disk; load() recognises them by checking whether the first four
+bytes make a plausible frame rate when no known version number is found.
+
+Both Shogun 2 layouts end in one event block (animation markers such as
+FIRE_TIME); CA's cinematic test exports append a second, empty one.
 
 Coordinates are in the game's space (right-handed, Y-up); conversion to
 Blender space happens elsewhere.  All data is little-endian.
@@ -43,11 +77,29 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-# Version 4 (pre-Rome 2) is deliberately unsupported: real v4 files use
-# UTF-16 strings and a different body layout, so they cannot be read with
-# the v5+ structure below (AssetEditor's reader has the same limitation).
-SUPPORTED_READ_VERSIONS = (5, 6, 7, 8)
-SUPPORTED_WRITE_VERSIONS = (5, 6, 7)
+# Version 1 is Shogun 2 (see the module docstring); it shares none of the
+# v5+ body layout and is handled by its own reader/writer below.
+#
+# Version 4 (Napoleon-era) remains unsupported: like v1 it uses UTF-16
+# strings and a non-v5 body layout, but no sample was available to
+# reverse-engineer it (AssetEditor cannot read real v4 files either).
+SHOGUN2_VERSION = 1
+
+# Some Shogun 2 files (campaign pieces, and a few reference skeletons) have
+# no version field at all and start straight at the frame rate, with ten
+# floats per bone per frame instead of seven.  There is no number in the
+# file to name them by, so version 0 is used as a synthetic id; it is never
+# written into a file.  See _load_v0.
+SHOGUN2_NO_HEADER_VERSION = 0
+
+# Version numbers that actually appear in a file's first field.  The
+# headerless variant has none, so 0 is absent here but writable.
+SUPPORTED_READ_VERSIONS = (1, 5, 6, 7, 8)
+SUPPORTED_WRITE_VERSIONS = (0, 1, 5, 6, 7, 8)
+
+# Frame rates seen in real files are 20 and 30; this bound only has to
+# separate a plausible rate from a version number or garbage.
+_PLAUSIBLE_FRAME_RATE = (1.0, 1000.0)
 
 MAPPING_NONE = -1
 _STATIC_BASE = 10000
@@ -98,12 +150,24 @@ class BoneMapping:
 
 @dataclass
 class AnimFrame:
-    """One frame: (n,3) float32 translations and (n,4) float32 xyzw quats
-    (already divided by 32767)."""
+    """One frame: (n,3) translations and (n,4) xyzw quats (already
+    divided by 32767).
+
+    float32, except in version 8, where the frames are float64.  Its
+    byte-packed channels decode as `base + (byte / 127) * scale`, and
+    where the base dwarfs the scale - Warhammer 3 has bones at a ratio
+    of six million - a single byte step is finer than float32 resolves.
+    Rounding the decode to float32 would quietly merge adjacent bytes,
+    and the file could no longer be written back as it was read."""
     translations: np.ndarray = field(
         default_factory=lambda: np.zeros((0, 3), np.float32))
     rotations: np.ndarray = field(
         default_factory=lambda: np.zeros((0, 4), np.float32))
+    # Version 0 only: three further floats per bone, 0.001 in every file
+    # seen.  Purpose unknown (they are not scale - that would be 1.0); kept
+    # verbatim so those files re-save unchanged.
+    extras: np.ndarray = field(
+        default_factory=lambda: np.zeros((0, 3), np.float32))
 
 
 @dataclass
@@ -112,6 +176,36 @@ class AnimPart:
     rotation_mappings: list = field(default_factory=list)     # [BoneMapping]
     static_frame: AnimFrame | None = None
     dynamic_frames: list = field(default_factory=list)        # [AnimFrame]
+    # The frame-count word when a part has no dynamic frames at all - a
+    # pose held entirely in the static frame.  It is usually 3, which is
+    # why it read as a quirk, but in CA's files it is really
+    # round(duration * frame_rate) + 1: the length the animation would
+    # have had, written even though no frames follow.  81 for a 4-second
+    # pose at 20 fps, 7 for a 0.3-second one.  None means "write 3", so
+    # a file built from scratch behaves as before; loading keeps the
+    # real value, which is what makes those files re-save unchanged.
+    declared_frame_count: int | None = None
+
+    # Version 8 only.  A v8 part does not store its channels plainly: a
+    # per-bone int8 "rate" says how each one is packed, and the byte
+    # encodings decode through a per-bone range.  The rate's sign is
+    # also the mapping table (negative static, positive dynamic, zero
+    # not animated), so the mappings above are derived from these on
+    # load rather than stored separately in the file.
+    #
+    #     translations: 12 = three float32, 3 = three int8 through a range
+    #     rotations:     8 = four int16/32767, 4 = four int8 through a range
+    #
+    # None means "not read from a file": the writer then picks the
+    # uncompressed rates (12 and 8), which need no ranges and lose
+    # nothing.  Ranges are kept exactly as read because their array
+    # length does not follow from the rates - CA writes a count of its
+    # own choosing, longer than the last ranged bone in about a third of
+    # parts.
+    translation_rates: np.ndarray | None = None       # int8, per bone
+    rotation_rates: np.ndarray | None = None          # int8, per bone
+    translation_ranges: np.ndarray | None = None      # (n, 2, 3) f32
+    rotation_ranges: np.ndarray | None = None         # (n, 2, 4) f32
 
 
 @dataclass
@@ -121,9 +215,24 @@ class AnimFile:
     skeleton_name: str = ""
     flags: list = field(default_factory=list)       # v7+ flag strings
     duration: float = 0.0                           # total playtime, seconds
-    unknown_v8: int = 0
+    # The u32 straight after the version.  AssetEditor treats it as a
+    # constant 1 and so did this reader, but it is not: of Warhammer 3's
+    # 34921 animations, 38 (all v7, all bird03 attacks) carry 2 and one
+    # (a v8 bigcat03b idle) carries 0.  Nothing else about those files
+    # stands out, so it reads as exporter noise rather than a flag with
+    # meaning - but it has to be kept, or those files do not re-save.
+    header_type: int = 1
+    # Version 8 only: the u32 after the bone table.  6 in every
+    # vanilla file, so that is what a new one gets.
+    unknown_v8: int = 6
     bones: list = field(default_factory=list)       # [AnimBone]
     parts: list = field(default_factory=list)       # [AnimPart]
+    # Shogun 2 trailing metadata: a list of string tuples, e.g.
+    # ("FIRE_TIME", "0.46") or ("FIRE_POSITION", "0.00", "3.66", "0.24").
+    events: list = field(default_factory=list)
+    # CA's cinematic test exports carry a second, always-empty event block
+    # after the first.  Each entry here is another list of string tuples.
+    extra_event_blocks: list = field(default_factory=list)
 
     @property
     def bone_count(self) -> int:
@@ -189,6 +298,14 @@ class _Reader:
         self.off += length
         return raw.decode("utf-8", errors="replace")
 
+    def string_utf16(self) -> str:
+        """v1 strings: a *character* count followed by UTF-16LE data."""
+        length = self.unpack("<H")[0] * 2
+        self._need(length)
+        raw = self.data[self.off:self.off + length]
+        self.off += length
+        return raw.decode("utf-16-le", errors="replace")
+
     def bytes_(self, n: int) -> bytes:
         self._need(n)
         raw = self.data[self.off:self.off + n]
@@ -203,15 +320,22 @@ class _Reader:
 _QUAT_SCALE = 1.0 / 32767.0
 
 
-def _read_frame(r: _Reader, pos_count: int, rot_count: int) -> AnimFrame:
+def _read_frame(r: _Reader, pos_count: int, rot_count: int,
+                quat_float: bool = False) -> AnimFrame:
+    """Read one frame.  v5+ packs quaternions as int16/32767; v1 (Shogun 2)
+    stores them as plain float32 - hence `quat_float`."""
     frame = AnimFrame()
     if pos_count:
         raw = np.frombuffer(r.bytes_(pos_count * 12), dtype="<f4")
         frame.translations = raw.reshape(pos_count, 3).astype(np.float32)
     if rot_count:
-        raw = np.frombuffer(r.bytes_(rot_count * 8), dtype="<i2")
-        frame.rotations = (raw.reshape(rot_count, 4).astype(np.float32)
-                           * _QUAT_SCALE)
+        if quat_float:
+            raw = np.frombuffer(r.bytes_(rot_count * 16), dtype="<f4")
+            frame.rotations = raw.reshape(rot_count, 4).astype(np.float32)
+        else:
+            raw = np.frombuffer(r.bytes_(rot_count * 8), dtype="<i2")
+            frame.rotations = (raw.reshape(rot_count, 4).astype(np.float32)
+                               * _QUAT_SCALE)
     return frame
 
 
@@ -225,10 +349,18 @@ def load(data: bytes) -> AnimFile:
 
     anim.version = r.u32()
     if anim.version not in SUPPORTED_READ_VERSIONS:
+        # No version field at all?  Then those 4 bytes are the frame rate.
+        rate = struct.unpack_from("<f", data, 0)[0]
+        if _PLAUSIBLE_FRAME_RATE[0] <= rate <= _PLAUSIBLE_FRAME_RATE[1]:
+            r.off = 0
+            anim.version = SHOGUN2_NO_HEADER_VERSION
+            return _load_v0(r, anim)
         raise AnimFormatError(
             f"Unsupported .anim version {anim.version} - is this really "
             f"a .anim file? (supported: {SUPPORTED_READ_VERSIONS})")
-    always_one = r.u32()    # noqa: F841  (type field, always 1)
+    if anim.version == SHOGUN2_VERSION:
+        return _load_v1(r, anim)
+    anim.header_type = r.u32()
     anim.frame_rate = r.f32()
     anim.skeleton_name = r.string()
 
@@ -260,6 +392,88 @@ def load(data: bytes) -> AnimFile:
     return anim
 
 
+def _read_event_block(r: _Reader) -> list:
+    event_count = r.u32()
+    if event_count > 100000:
+        raise AnimFormatError(f"Implausible event count {event_count}")
+    events = []
+    for _ in range(event_count):
+        string_count = r.u32()
+        if string_count > 1000:
+            raise AnimFormatError(
+                f"Implausible event string count {string_count}")
+        events.append(tuple(r.string_utf16() for _ in range(string_count)))
+    return events
+
+
+def _load_shogun2_body(r: _Reader, anim: AnimFile,
+                       floats_per_bone: int) -> AnimFile:
+    """Shared body of the two Shogun 2 layouts; `r` is positioned at the
+    frame rate.  floats_per_bone is 7 for v1 and 10 for v0."""
+    anim.frame_rate = r.f32()
+    anim.duration = r.f32()
+
+    bone_count = r.u32()
+    if bone_count > 100000:
+        raise AnimFormatError(f"Implausible bone count {bone_count}")
+    for _ in range(bone_count):
+        name = r.string_utf16()
+        anim.bones.append(AnimBone(name=name, parent=r.i32()))
+
+    frame_count = r.u32()
+    if frame_count > 1000000:
+        raise AnimFormatError(f"Implausible frame count {frame_count}")
+
+    # Every bone is animated in every frame, so the mapping tables that
+    # v5+ files carry are implicit here: bone i is dynamic entry i.
+    part = AnimPart()
+    part.translation_mappings = [BoneMapping(i) for i in range(bone_count)]
+    part.rotation_mappings = [BoneMapping(i) for i in range(bone_count)]
+
+    # A frame is bone_count * (vec3 + xyzw quat [+ 3 extras]), all float32,
+    # interleaved per bone rather than stored as two blocks the way v5+
+    # does it.
+    if bone_count:
+        need = frame_count * bone_count * floats_per_bone * 4
+        raw = np.frombuffer(r.bytes_(need), dtype="<f4")
+        raw = raw.reshape(frame_count, bone_count, floats_per_bone)
+        for f in range(frame_count):
+            frame = AnimFrame(
+                translations=raw[f, :, 0:3].astype(np.float32),
+                rotations=raw[f, :, 3:7].astype(np.float32))
+            if floats_per_bone > 7:
+                frame.extras = raw[f, :, 7:floats_per_bone].astype(np.float32)
+            part.dynamic_frames.append(frame)
+    else:
+        # No bones means no frame data, but the count still has to survive
+        # a load/save cycle (CA ships a few such stubs).
+        part.dynamic_frames = [AnimFrame() for _ in range(frame_count)]
+    anim.parts = [part]
+
+    anim.events = _read_event_block(r)
+    # A second, always-empty event block appears in CA's cinematic test
+    # exports.  Read any that are present so they can be written back.
+    while r.remaining >= 4:
+        anim.extra_event_blocks.append(_read_event_block(r))
+
+    if r.remaining:
+        raise AnimFormatError(
+            f"{r.remaining} unparsed bytes at the end of the file")
+    return anim
+
+
+def _load_v1(r: _Reader, anim: AnimFile) -> AnimFile:
+    """Read a Shogun 2 (version 1) file; `r` is positioned after the
+    version field.  See the module docstring for the layout."""
+    return _load_shogun2_body(r, anim, floats_per_bone=7)
+
+
+def _load_v0(r: _Reader, anim: AnimFile) -> AnimFile:
+    """Read the headerless Shogun 2 variant; `r` is positioned at byte 0
+    (there is no version field to skip)."""
+    return _load_shogun2_body(r, anim, floats_per_bone=10)
+
+
 def _load_part_default(r: _Reader, bone_count: int,
                        version: int) -> AnimPart:
     part = AnimPart()
@@ -277,7 +491,11 @@ def _load_part_default(r: _Reader, bone_count: int,
 
     pos_count = r.i32()
     rot_count = r.i32()
-    frame_count = r.i32()   # 3 when there is no data, for unknown reasons
+    frame_count = r.i32()
+    if not (pos_count or rot_count):
+        # No dynamic data, so this word is a leftover - see
+        # AnimPart.declared_frame_count.
+        part.declared_frame_count = frame_count
     if pos_count or rot_count:
         if frame_count < 0 or frame_count > 1000000:
             raise AnimFormatError(f"Implausible frame count {frame_count}")
@@ -293,66 +511,80 @@ def _load_parts_v8(r: _Reader, bone_count: int) -> list:
         raise AnimFormatError(f"Implausible part count {part_count}")
 
     for _ in range(part_count):
-        part = AnimPart()
-
-        # Per-bone bit rates double as the mapping table: sign selects
-        # static (negative) vs dynamic (positive) vs none (zero).
-        trans_rates = np.frombuffer(r.bytes_(bone_count), dtype=np.int8)
-        dyn = stat = 0
-        for rate in trans_rates:
-            if rate < 0:
-                part.translation_mappings.append(
-                    BoneMapping(_STATIC_BASE + stat))
-                stat += 1
-            elif rate > 0:
-                part.translation_mappings.append(BoneMapping(dyn))
-                dyn += 1
-            else:
-                part.translation_mappings.append(BoneMapping(MAPPING_NONE))
-
-        rot_rates = np.frombuffer(r.bytes_(bone_count), dtype=np.int8)
-        dyn = stat = 0
-        for rate in rot_rates:
-            if rate < 0:
-                part.rotation_mappings.append(
-                    BoneMapping(_STATIC_BASE + stat))
-                stat += 1
-            elif rate > 0:
-                part.rotation_mappings.append(BoneMapping(dyn))
-                dyn += 1
-            else:
-                part.rotation_mappings.append(BoneMapping(MAPPING_NONE))
-
-        # Range maps for the byte-compressed encodings.  AssetEditor indexes
-        # these by absolute bone index.
-        trans_range_count = r.u32()
-        rot_range_count = r.u32()
-        trans_ranges = np.frombuffer(
-            r.bytes_(trans_range_count * 24),
-            dtype="<f4").reshape(trans_range_count, 2, 3)
-        rot_ranges = np.frombuffer(
-            r.bytes_(rot_range_count * 32),
-            dtype="<f4").reshape(rot_range_count, 2, 4)
-
-        static_pos = r.u32()
-        static_rot = r.u32()
-        if static_pos or static_rot:
-            part.static_frame = _read_frame_v8(
-                r, trans_rates, rot_rates, trans_ranges, rot_ranges,
-                dynamic=False)
-
-        dyn_pos = r.u32()
-        dyn_rot = r.u32()
-        frame_count = r.u32()
-        if frame_count > 1000000:
-            raise AnimFormatError(f"Implausible frame count {frame_count}")
-        if dyn_pos or dyn_rot:
-            for _ in range(frame_count):
-                part.dynamic_frames.append(_read_frame_v8(
-                    r, trans_rates, rot_rates, trans_ranges, rot_ranges,
-                    dynamic=True))
-        parts.append(part)
+        parts.append(_load_part_v8(r, bone_count))
     return parts
+
+
+def _load_part_v8(r: _Reader, bone_count: int) -> AnimPart:
+    """One version 8 part: its per-bone rates, range maps and frames."""
+    part = AnimPart()
+
+    # Per-bone bit rates double as the mapping table: sign selects
+    # static (negative) vs dynamic (positive) vs none (zero).
+    trans_rates = np.frombuffer(r.bytes_(bone_count), dtype=np.int8)
+    dyn = stat = 0
+    for rate in trans_rates:
+        if rate < 0:
+            part.translation_mappings.append(
+                BoneMapping(_STATIC_BASE + stat))
+            stat += 1
+        elif rate > 0:
+            part.translation_mappings.append(BoneMapping(dyn))
+            dyn += 1
+        else:
+            part.translation_mappings.append(BoneMapping(MAPPING_NONE))
+
+    rot_rates = np.frombuffer(r.bytes_(bone_count), dtype=np.int8)
+    dyn = stat = 0
+    for rate in rot_rates:
+        if rate < 0:
+            part.rotation_mappings.append(
+                BoneMapping(_STATIC_BASE + stat))
+            stat += 1
+        elif rate > 0:
+            part.rotation_mappings.append(BoneMapping(dyn))
+            dyn += 1
+        else:
+            part.rotation_mappings.append(BoneMapping(MAPPING_NONE))
+
+    # Range maps for the byte-compressed encodings.  AssetEditor indexes
+    # these by absolute bone index.
+    trans_range_count = r.u32()
+    rot_range_count = r.u32()
+    trans_ranges = np.frombuffer(
+        r.bytes_(trans_range_count * 24),
+        dtype="<f4").reshape(trans_range_count, 2, 3)
+    rot_ranges = np.frombuffer(
+        r.bytes_(rot_range_count * 32),
+        dtype="<f4").reshape(rot_range_count, 2, 4)
+    # Keep the packing so the file can be written back as it was.
+    part.translation_rates = trans_rates.copy()
+    part.rotation_rates = rot_rates.copy()
+    part.translation_ranges = trans_ranges.copy()
+    part.rotation_ranges = rot_ranges.copy()
+
+    static_pos = r.u32()
+    static_rot = r.u32()
+    if static_pos or static_rot:
+        part.static_frame = _read_frame_v8(
+            r, trans_rates, rot_rates, trans_ranges, rot_ranges,
+            dynamic=False)
+
+    dyn_pos = r.u32()
+    dyn_rot = r.u32()
+    frame_count = r.u32()
+    if frame_count > 1000000:
+        raise AnimFormatError(f"Implausible frame count {frame_count}")
+    if not (dyn_pos or dyn_rot):
+        # Same leftover as the v5-v7 layout - see
+        # AnimPart.declared_frame_count.
+        part.declared_frame_count = frame_count
+    if dyn_pos or dyn_rot:
+        for _ in range(frame_count):
+            part.dynamic_frames.append(_read_frame_v8(
+                r, trans_rates, rot_rates, trans_ranges, rot_ranges,
+                dynamic=True))
+    return part
 
 
 def _read_frame_v8(r: _Reader, trans_rates, rot_rates, trans_ranges,
@@ -369,9 +601,14 @@ def _read_frame_v8(r: _Reader, trans_rates, rot_rates, trans_ranges,
                 raise AnimFormatError(
                     f"Bone {bone} uses a ranged translation but the range "
                     f"map only has {len(trans_ranges)} entries")
-            n = np.frombuffer(r.bytes_(3), np.int8).astype(np.float32) / 127.0
+            # float64 throughout - see the note on AnimFrame.  A byte
+            # step here can be finer than float32 resolves near a large
+            # base, and rounding the decode now would lose which byte
+            # this was.
+            n = np.frombuffer(r.bytes_(3), np.int8).astype(np.float64) / 127.0
             lo, hi = trans_ranges[bone]
-            translations.append(tuple(hi + n * lo))
+            translations.append(
+                tuple(np.float64(hi) + n * np.float64(lo)))
         elif rate in (0, -12, -3):
             pass
         else:
@@ -389,9 +626,9 @@ def _read_frame_v8(r: _Reader, trans_rates, rot_rates, trans_ranges,
                 raise AnimFormatError(
                     f"Bone {bone} uses a ranged rotation but the range "
                     f"map only has {len(rot_ranges)} entries")
-            n = np.frombuffer(r.bytes_(4), np.int8).astype(np.float32) / 127.0
+            n = np.frombuffer(r.bytes_(4), np.int8).astype(np.float64) / 127.0
             lo, hi = rot_ranges[bone]
-            rotations.append(tuple(hi + n * lo))
+            rotations.append(tuple(np.float64(hi) + n * np.float64(lo)))
         elif rate in (0, -8, -4):
             pass
         else:
@@ -400,9 +637,9 @@ def _read_frame_v8(r: _Reader, trans_rates, rot_rates, trans_ranges,
 
     frame = AnimFrame()
     if translations:
-        frame.translations = np.array(translations, np.float32)
+        frame.translations = np.array(translations, np.float64)
     if rotations:
-        frame.rotations = np.array(rotations, np.float32)
+        frame.rotations = np.array(rotations, np.float64)
     return frame
 
 
@@ -495,6 +732,14 @@ def _write_string(out: bytearray, text: str):
     out += raw
 
 
+def _write_string_utf16(out: bytearray, text: str):
+    raw = text.encode("utf-16-le")
+    if len(text) > 0xFFFF:
+        raise AnimFormatError(f"String too long to store: {text[:40]}...")
+    out += struct.pack("<H", len(raw) // 2)
+    out += raw
+
+
 def _write_frame(out: bytearray, frame: AnimFrame, pos_count: int,
                  rot_count: int):
     if len(frame.translations) != pos_count \
@@ -504,28 +749,348 @@ def _write_frame(out: bytearray, frame: AnimFrame, pos_count: int,
             f"(expected {pos_count}/{rot_count}, got "
             f"{len(frame.translations)}/{len(frame.rotations)})")
     out += np.asarray(frame.translations, "<f4").tobytes()
-    quats = np.clip(np.asarray(frame.rotations, np.float32), -1.0, 1.0)
-    out += np.round(quats * 32767.0).astype("<i2").tobytes()
+    # Clamp after scaling, not before.  A stored -32768 reads back as
+    # -1.00003, and clipping the float to -1.0 first would write it out
+    # as -32767 - a real difference in 11 of Warhammer 3's v7 files.
+    # Clamping the scaled value keeps that extreme and still stops a
+    # quaternion component slightly over 1.0 from wrapping the int16.
+    quats = np.round(np.asarray(frame.rotations, np.float32) * 32767.0)
+    out += np.clip(quats, -32768.0, 32767.0).astype("<i2").tobytes()
+
+
+# Version 8 packing rates.  The uncompressed pair is what a file built
+# from scratch uses: no range map, and nothing lost.
+_V8_TRANS_RAW = 12
+_V8_TRANS_RANGED = 3
+_V8_ROT_RAW = 8
+_V8_ROT_RANGED = 4
+# How far outside its range a value may sit before the range is refitted.
+# Only float32 noise from the decode should ever land here.
+_V8_RANGE_SLACK = 1e-6
+
+
+def _v8_rates(part: AnimPart, bone_count: int, index: int) -> tuple:
+    """(translation rates, rotation rates) for one part.
+
+    Taken from the file when the part came from one, so it re-saves as
+    it was read; otherwise derived from the mappings, choosing the
+    uncompressed rates.
+    """
+    rates = []
+    for stored, mappings, raw, label in (
+            (part.translation_rates, part.translation_mappings,
+             _V8_TRANS_RAW, "translation"),
+            (part.rotation_rates, part.rotation_mappings,
+             _V8_ROT_RAW, "rotation")):
+        if stored is not None:
+            if len(stored) != bone_count:
+                raise AnimFormatError(
+                    f"Part {index}: {len(stored)} {label} rates for "
+                    f"{bone_count} bones")
+            rates.append(np.asarray(stored, np.int8))
+            continue
+        derived = np.zeros(bone_count, np.int8)
+        for bone, mapping in enumerate(mappings):
+            if mapping.is_dynamic:
+                derived[bone] = raw
+            elif mapping.is_static:
+                derived[bone] = -raw
+        rates.append(derived)
+    return tuple(rates)
+
+
+def _v8_channel_values(part: AnimPart, rate_array, ranged: int,
+                       rotations: bool) -> dict:
+    """{bone: (n, width) values} for the bones packed through a range.
+
+    Walks the frames the way the reader does - a bone's entry sits at
+    the running count of bones before it that carry data of the same
+    kind - so the values line up with the bone the range belongs to.
+    """
+    out = {}
+    for dynamic in (False, True):
+        frames = (part.dynamic_frames if dynamic
+                  else ([part.static_frame] if part.static_frame else []))
+        if not frames:
+            continue
+        cursor = 0
+        for bone, stored in enumerate(rate_array):
+            rate = int(stored) if dynamic else -int(stored)
+            if rate <= 0:
+                continue
+            column = cursor
+            cursor += 1
+            if rate != ranged:
+                continue
+            rows = [(frame.rotations if rotations else frame.translations)
+                    [column] for frame in frames]
+            out.setdefault(bone, []).extend(rows)
+    return {bone: np.asarray(rows, np.float32)
+            for bone, rows in out.items()}
+
+
+def _v8_fit_range(values: np.ndarray) -> np.ndarray:
+    """A (2, width) range that covers `values` exactly.
+
+    The reader decodes byte n as `hi + (n / 127) * lo`, so the base is
+    the midpoint and the scale is the half-width.
+    """
+    low = values.min(axis=0)
+    high = values.max(axis=0)
+    return np.stack([(high - low) / 2.0, (high + low) / 2.0]).astype(
+        np.float32)
+
+
+def _v8_ranges(part: AnimPart, rates: tuple, index: int) -> tuple:
+    """The per-bone range maps for the byte-packed channels.
+
+    A part read from a file keeps the ranges it came with, so it writes
+    back as it was - but only while they still hold its values.  Edit a
+    bone past the range it was exported with and the range is refitted
+    around what is actually there, rather than clipping the animation to
+    the old one.  A part built from scratch uses the uncompressed rates
+    and needs no ranges at all.
+    """
+    out = []
+    for stored, rate_array, ranged, width, rotations in (
+            (part.translation_ranges, rates[0], _V8_TRANS_RANGED, 3, False),
+            (part.rotation_ranges, rates[1], _V8_ROT_RANGED, 4, True)):
+        needed = _v8_channel_values(part, rate_array, ranged, rotations)
+        if not needed:
+            out.append(np.zeros((0, 2, width), np.float32))
+            continue
+
+        size = max(len(stored) if stored is not None else 0,
+                   max(needed) + 1)
+        table = np.zeros((size, 2, width), np.float32)
+        if stored is not None:
+            table[:len(stored)] = np.asarray(stored, np.float32)
+
+        for bone, values in needed.items():
+            scale, base = table[bone]
+            low = base - np.abs(scale)
+            high = base + np.abs(scale)
+            if stored is None or np.any(values < low - _V8_RANGE_SLACK) \
+                    or np.any(values > high + _V8_RANGE_SLACK):
+                table[bone] = _v8_fit_range(values)
+        out.append(table)
+    return tuple(out)
+
+
+def _v8_pack_ranged(values, lo, hi) -> bytes:
+    """The inverse of the reader's `hi + n * lo`, with n = byte / 127.
+
+    In float64 deliberately.  Some ranges are extreme - Warhammer 3 has
+    bones whose base is six million times its scale - and there the
+    stored float32 barely holds the byte it came from.  Doing the
+    recovery in float32 as well throws away the little that is left and
+    lands a byte low; float64 recovers all but the cases where the
+    float32 itself has lost the bit.
+    """
+    scale = np.asarray(lo, np.float64)
+    base = np.asarray(hi, np.float64)
+    # No vanilla range has a zero scale (checked across every version 8
+    # file in Warhammer 3), but a hand-built one could: such a channel
+    # cannot say anything but the base value, so 0 is the honest byte.
+    safe = np.where(scale == 0.0, 1.0, scale)
+    n = np.where(scale == 0.0, 0.0,
+                 (np.asarray(values, np.float64) - base) / safe * 127.0)
+    return np.clip(np.round(n), -128.0, 127.0).astype(np.int8).tobytes()
+
+
+def _write_frame_v8(out: bytearray, frame: AnimFrame, rates: tuple,
+                    ranges: tuple, dynamic: bool, index: int):
+    """One version 8 frame, walking the bones in order as the reader does."""
+    trans_rates, rot_rates = rates
+    trans_ranges, rot_ranges = ranges
+    kind = "dynamic" if dynamic else "static"
+
+    cursor = 0
+    for bone, stored in enumerate(trans_rates):
+        rate = int(stored) if dynamic else -int(stored)
+        if rate not in (_V8_TRANS_RAW, _V8_TRANS_RANGED):
+            continue
+        if cursor >= len(frame.translations):
+            raise AnimFormatError(
+                f"Part {index}: the {kind} frame has "
+                f"{len(frame.translations)} translations, but the rates "
+                f"ask for more")
+        value = frame.translations[cursor]
+        cursor += 1
+        if rate == _V8_TRANS_RAW:
+            out += struct.pack("<3f", *value)
+        else:
+            lo, hi = trans_ranges[bone]
+            out += _v8_pack_ranged(value, lo, hi)
+    if cursor != len(frame.translations):
+        raise AnimFormatError(
+            f"Part {index}: the {kind} frame has "
+            f"{len(frame.translations)} translations but the rates use "
+            f"{cursor}")
+
+    cursor = 0
+    for bone, stored in enumerate(rot_rates):
+        rate = int(stored) if dynamic else -int(stored)
+        if rate not in (_V8_ROT_RAW, _V8_ROT_RANGED):
+            continue
+        if cursor >= len(frame.rotations):
+            raise AnimFormatError(
+                f"Part {index}: the {kind} frame has "
+                f"{len(frame.rotations)} rotations, but the rates ask "
+                "for more")
+        value = frame.rotations[cursor]
+        cursor += 1
+        if rate == _V8_ROT_RAW:
+            quat = np.round(np.asarray(value, np.float32) * 32767.0)
+            out += np.clip(quat, -32768.0, 32767.0).astype("<i2").tobytes()
+        else:
+            lo, hi = rot_ranges[bone]
+            out += _v8_pack_ranged(value, lo, hi)
+    if cursor != len(frame.rotations):
+        raise AnimFormatError(
+            f"Part {index}: the {kind} frame has {len(frame.rotations)} "
+            f"rotations but the rates use {cursor}")
+
+
+def _save_v8_parts(out: bytearray, anim: AnimFile):
+    out += struct.pack("<I", len(anim.parts))
+    for index, part in enumerate(anim.parts):
+        _encode_v8_part(out, part, anim, index)
+
+
+def _encode_v8_part(out: bytearray, part: AnimPart, anim: AnimFile,
+                    index: int):
+    if len(part.translation_mappings) != anim.bone_count \
+            or len(part.rotation_mappings) != anim.bone_count:
+        raise AnimFormatError(
+            f"Part {index}: mapping table lengths must equal the "
+            f"bone count ({anim.bone_count})")
+    rates = _v8_rates(part, anim.bone_count, index)
+    ranges = _v8_ranges(part, rates, index)
+
+    out += rates[0].astype(np.int8).tobytes()
+    out += rates[1].astype(np.int8).tobytes()
+    out += struct.pack("<II", len(ranges[0]), len(ranges[1]))
+    out += ranges[0].astype("<f4").tobytes()
+    out += ranges[1].astype("<f4").tobytes()
+
+    static = part.static_frame
+    if static is not None:
+        out += struct.pack("<II", len(static.translations),
+                           len(static.rotations))
+        _write_frame_v8(out, static, rates, ranges, False, index)
+    else:
+        out += struct.pack("<II", 0, 0)
+
+    if part.dynamic_frames:
+        first = part.dynamic_frames[0]
+        out += struct.pack("<III", len(first.translations),
+                           len(first.rotations),
+                           len(part.dynamic_frames))
+        for frame in part.dynamic_frames:
+            _write_frame_v8(out, frame, rates, ranges, True, index)
+    else:
+        out += struct.pack("<III", 0, 0,
+                           0 if part.declared_frame_count is None
+                           else part.declared_frame_count)
+
+
+def _write_event_block(out: bytearray, events: list):
+    out += struct.pack("<I", len(events))
+    for event in events:
+        out += struct.pack("<I", len(event))
+        for text in event:
+            _write_string_utf16(out, text)
+
+
+def _save_shogun2(anim: AnimFile, part: AnimPart) -> bytes:
+    """Serialize a Shogun 2 file (version 1, or 0 for the headerless
+    variant).  Every bone must be dynamic in every frame - neither layout
+    has any way to express anything else."""
+    bone_count = anim.bone_count
+    headerless = anim.version == SHOGUN2_NO_HEADER_VERSION
+    floats_per_bone = 10 if headerless else 7
+
+    for label, mappings in (("translation", part.translation_mappings),
+                            ("rotation", part.rotation_mappings)):
+        for i, mapping in enumerate(mappings):
+            if not mapping.is_dynamic or mapping.index != i:
+                raise AnimFormatError(
+                    f"Shogun 2 files require every bone to be dynamic: "
+                    f"bone {i} has {label} mapping {mapping}")
+    if part.static_frame is not None:
+        raise AnimFormatError("Shogun 2 files have no static frame")
+
+    out = bytearray()
+    if not headerless:
+        out += struct.pack("<I", anim.version)
+    out += struct.pack("<ff", anim.frame_rate, anim.duration)
+
+    out += struct.pack("<I", bone_count)
+    for bone in anim.bones:
+        _write_string_utf16(out, bone.name)
+        out += struct.pack("<i", bone.parent)
+
+    out += struct.pack("<I", len(part.dynamic_frames))
+    for frame in part.dynamic_frames:
+        if not bone_count:
+            continue        # a bone-less stub carries no frame data
+        if len(frame.translations) != bone_count \
+                or len(frame.rotations) != bone_count:
+            raise AnimFormatError(
+                f"Shogun 2 files need one translation and one rotation "
+                f"per bone per frame (expected {bone_count}, got "
+                f"{len(frame.translations)}/{len(frame.rotations)})")
+        # Interleaved per bone: vec3 translation then xyzw quaternion.
+        block = np.empty((bone_count, floats_per_bone), np.float32)
+        block[:, 0:3] = frame.translations
+        block[:, 3:7] = frame.rotations
+        if headerless:
+            if len(frame.extras) == bone_count:
+                block[:, 7:10] = frame.extras
+            elif len(frame.extras) == 0:
+                block[:, 7:10] = 0.001      # the value CA writes
+            else:
+                raise AnimFormatError(
+                    f"Version 0 needs three extra floats per bone per "
+                    f"frame (expected {bone_count}, got "
+                    f"{len(frame.extras)})")
+        out += block.astype("<f4").tobytes()
+
+    _write_event_block(out, anim.events)
+    for block in anim.extra_event_blocks:
+        _write_event_block(out, block)
+
+    return bytes(out)
 
 
 def save(anim: AnimFile) -> bytes:
-    """Serialize. Only versions 5-7 with a single part can be written
-    (same limitation as AssetEditor)."""
+    """Serialize any version this module reads.
+
+    Version 8 is the only layout with more than one part; the rest hold
+    exactly one.
+    """
     if anim.version not in SUPPORTED_WRITE_VERSIONS:
         raise AnimFormatError(
             f"Cannot write .anim version {anim.version} "
             f"(writable: {SUPPORTED_WRITE_VERSIONS})")
-    if len(anim.parts) != 1:
+    if not anim.parts:
+        raise AnimFormatError("An animation needs at least one part")
+    if anim.version != 8 and len(anim.parts) != 1:
         raise AnimFormatError(
-            f"Cannot write a {len(anim.parts)}-part animation "
-            "(exactly one part required)")
+            f"Cannot write a {len(anim.parts)}-part version "
+            f"{anim.version} animation - only version 8 has parts")
     part = anim.parts[0]
     if len(part.translation_mappings) != anim.bone_count \
             or len(part.rotation_mappings) != anim.bone_count:
         raise AnimFormatError("Mapping table lengths must equal bone count")
 
+    if anim.version in (SHOGUN2_VERSION, SHOGUN2_NO_HEADER_VERSION):
+        return _save_shogun2(anim, part)
+
     out = bytearray()
-    out += struct.pack("<IIf", anim.version, 1, anim.frame_rate)
+    out += struct.pack("<IIf", anim.version, anim.header_type,
+                       anim.frame_rate)
     _write_string(out, anim.skeleton_name)
     if anim.version > 6:
         out += struct.pack("<I", len(anim.flags))
@@ -537,6 +1102,11 @@ def save(anim: AnimFile) -> bytes:
     for bone in anim.bones:
         _write_string(out, bone.name)
         out += struct.pack("<i", bone.parent)
+
+    if anim.version == 8:
+        out += struct.pack("<I", anim.unknown_v8)
+        _save_v8_parts(out, anim)
+        return bytes(out)
 
     for mapping in part.translation_mappings:
         out += struct.pack("<i", mapping.value)
@@ -565,7 +1135,10 @@ def save(anim: AnimFile) -> bytes:
         for frame in part.dynamic_frames:
             _write_frame(out, frame, pos_count, rot_count)
     else:
-        out += struct.pack("<iii", 0, 0, 3)     # 3: quirk kept from CA files
+        # See AnimPart.declared_frame_count: not always 3.
+        out += struct.pack("<iii", 0, 0,
+                           3 if part.declared_frame_count is None
+                           else part.declared_frame_count)
 
     return bytes(out)
 

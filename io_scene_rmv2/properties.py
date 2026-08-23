@@ -30,12 +30,44 @@ VERTEX_FORMAT_ITEMS = [
     ("STATIC", "Static", "No bone weights (buildings, props). 2 UV channels"),
     ("WEIGHTED", "Weighted", "2 bone influences per vertex"),
     ("CINEMATIC", "Cinematic", "4 bone influences per vertex"),
+    # Shogun 2 only. Its materials have no vertex-format field - the game
+    # infers the layout from the stride - so keeping the one a mesh was
+    # imported with matters: its material expects that exact stride.
+    ("S2_POSITION_UV", "Shogun 2 Position+UV",
+     "Shogun 2: position and one UV only, no tangent frame (12 bytes)"),
+    ("S2_STATIC", "Shogun 2 Static",
+     "Shogun 2: like Static but with a single UV channel (28 bytes)"),
+    ("S2_STATIC_FLOAT", "Shogun 2 Static (float)",
+     "Shogun 2: Static with full float32 positions and UVs (44 bytes)"),
+    ("S2_BOW_WAVE", "Shogun 2 Bow Wave",
+     "Shogun 2: the bow_wave effect layout (24 bytes). Read-only - it "
+     "carries a second position channel that cannot be rebuilt from a "
+     "Blender mesh, so an edited bow_wave mesh cannot be exported"),
+    # .variant_part_mesh only. Like the Shogun 2 entries above, the file
+    # has no vertex-format field of its own - the layout is chosen by the
+    # header - so the one a mesh was imported with is what should be
+    # written back unless the user deliberately changes it.
+    ("VMPF_SKINNED", "Variant Part Skinned",
+     "Shogun 2 unit part: 2 weighted bone influences, each position "
+     "stored in its own bone's space (48 bytes). Needs an armature"),
+    ("VMPF_RIGID", "Variant Part Rigid",
+     "Shogun 2 unit part: plain float32 model-space positions, no "
+     "skinning (64 bytes) - equipment, crests and blank parts"),
 ]
+
+# The .variant_part_mesh layouts are not RMV2 vertex formats, so they are
+# deliberately absent from VERTEX_FORMAT_TO_INT below; export_rmv2 treats
+# anything it does not recognise as Auto.
+VMPF_FORMAT_IDS = ("VMPF_SKINNED", "VMPF_RIGID")
 
 VERTEX_FORMAT_TO_INT = {
     "STATIC": rf.VF_STATIC,
     "WEIGHTED": rf.VF_WEIGHTED,
     "CINEMATIC": rf.VF_CINEMATIC,
+    "S2_POSITION_UV": rf.VF_S2_POSITION_UV,
+    "S2_STATIC": rf.VF_S2_STATIC_NO_UV2,
+    "S2_STATIC_FLOAT": rf.VF_S2_STATIC_FLOAT,
+    "S2_BOW_WAVE": rf.VF_S2_BOW_WAVE,
 }
 VERTEX_FORMAT_FROM_INT = {v: k for k, v in VERTEX_FORMAT_TO_INT.items()}
 
@@ -88,10 +120,36 @@ ALPHA_MODE_ITEMS = [
 ]
 
 VERSION_ITEMS = [
+    ("1", "RMV2 v1", "Shogun 2 era (no shader name per mesh)"),
+    ("2", "RMV2 v2", "Shogun 2 era"),
+    ("5", "RMV2 v5", "Rome 2 era - AssetEditor reads this but will not "
+     "write it"),
     ("6", "RMV2 v6", "Rome 2 / Attila era"),
     ("7", "RMV2 v7", "Warhammer 1 & 2 era"),
-    ("8", "RMV2 v8", "Warhammer 3 / Troy era (vertex colours)"),
+    ("8", "RMV2 v8", "Warhammer 3 / Troy era (vertex colours). Two out of "
+     "three Warhammer 3 meshes are this version"),
 ]
+
+# The Shogun 2 .variant_part_mesh versions.  Version 1 does not exist.
+VMPF_VERSION_ITEMS = [
+    ("0", "VMPF v0", "The oldest layout: its skinned vertex is eight bytes "
+     "shorter, with no tangent frame on the second influence"),
+    ("2", "VMPF v2", "Fauna and horses"),
+    ("3", "VMPF v3", "The common one - unit parts and equipment"),
+]
+
+# .variant_weighted_mesh has one real version plus the headerless form.
+VWM_VERSION_ITEMS = [
+    ("1", "VWM v1", "The shipping layout, with magic and material "
+     "parameters"),
+    ("0", "Headerless", "No magic, version or parameter block - 15 vanilla "
+     "unit meshes use it"),
+]
+
+# The Shogun 2 versions use a completely different header, material and
+# vertex layout to 5-8; a model cannot simply be re-versioned across the
+# divide (see rmv2_format._save_shogun2).
+SHOGUN2_VERSION_IDS = {"1", "2"}
 
 
 # ---------------------------------------------------------------------------
@@ -256,7 +314,18 @@ class RMV2CollectionSettings(bpy.types.PropertyGroup):
         description="This collection represents one .rigid_model_v2 file",
         update=_on_is_rmv2_root_update)
     version: EnumProperty(
-        name="Version", items=VERSION_ITEMS, default="7")
+        name="Version", items=VERSION_ITEMS, default="8",
+        description="RMV2 version to write. Set from the file on import; "
+        "a model built from scratch starts at the version Warhammer 3 "
+        "most commonly ships")
+    vmpf_version: EnumProperty(
+        name="VMPF Version", items=VMPF_VERSION_ITEMS, default="3",
+        description="Version for .variant_part_mesh export, set from the "
+        "file on import")
+    vwm_version: EnumProperty(
+        name="VWM Version", items=VWM_VERSION_ITEMS, default="1",
+        description="Version for .variant_weighted_mesh export, set from "
+        "the file on import")
     skeleton_name: StringProperty(
         name="Skeleton", default="",
         description="Skeleton name written to the file header, e.g. "
@@ -276,6 +345,12 @@ class RMV2CollectionSettings(bpy.types.PropertyGroup):
         "active (0 = visible on all settings)")
     lod_overrides: CollectionProperty(type=RMV2LodOverride)
     active_lod_override_index: IntProperty(default=0)
+    arm_version: IntProperty(
+        name="ARM Version", default=5, min=0, max=5,
+        description="Object version for .animatable_rigid_model / "
+        ".rigid_model export. 3, 4 and 5 are the Shogun 2 era (5 is the "
+        "common one); 1 is the Empire/Napoleon object, and 0 is the "
+        "headerless variant that carries no per-object magic at all")
 
 
 class RMV2ArmatureSettings(bpy.types.PropertyGroup):
@@ -290,17 +365,28 @@ class RMV2ArmatureSettings(bpy.types.PropertyGroup):
         "animations). Animations imported onto this armature are checked "
         "against this name")
     anim_version: IntProperty(
-        name="Anim Version", default=7, min=0, max=8,
+        name="Anim Version", default=8, min=0, max=8,
         description="The .anim format version last imported/exported for "
         "this armature; used as the export default")
     anim_fps: FloatProperty(
         name="Frame Rate", default=20.0, min=0.0,
         description="Frame rate from the .anim header; used as the "
         "export default")
+    anim_header_type: IntProperty(
+        name="Header Type", default=1, min=0, max=255,
+        description="The u32 after the version in the .anim header. 1 in "
+        "almost every file; a handful of Warhammer 3 animations carry 2 "
+        "or 0. Its meaning is unknown, so it is preserved rather than "
+        "assumed")
     flags: StringProperty(
         name="Flags", default="",
         description="Comma-separated v7+ animation flag strings (rare, "
         "e.g. shake_camera), preserved for re-export")
+    events_json: StringProperty(
+        name="Events", default="",
+        description="Shogun 2 animation events (FIRE_TIME, OFF_BONE1, "
+        "FIRE_POSITION...) as JSON, preserved for re-export. Shogun 2 "
+        "stores these in the .anim itself rather than a separate table")
 
 
 class RMV2AddonPreferences(bpy.types.AddonPreferences):

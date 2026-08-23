@@ -506,9 +506,22 @@ def extract_mesh_arrays(context, obj, options, warnings,
         # the translation is written as the material pivot instead, and
         # the game adds it back at render time (raw + pivot), so baking
         # it into the vertices would apply it twice.
-        mw = np.array(obj.matrix_world, dtype=np.float64)
+        #
+        # Shogun 2 works the other way round: a mesh is welded to a bone
+        # and its vertices are stored in that bone's space, with no pivot
+        # field to hold the offset. The importer therefore binds the
+        # object with a Child Of constraint whose inverse is identity, so
+        # matrix_world = bone_world @ matrix_basis - using matrix_world
+        # here would apply the bone's transform a second time. The
+        # object's own local matrix is what belongs in the file, and the
+        # translation is baked into the vertices for want of a pivot.
+        bone_local = options.get("bone_local_space", False)
+        mw = np.array(obj.matrix_basis if bone_local else obj.matrix_world,
+                      dtype=np.float64)
         m3 = mw[:3, :3]
         positions_w = positions @ m3.T
+        if bone_local:
+            positions_w = positions_w + mw[:3, 3]
         det = float(np.linalg.det(m3))
         if abs(det) < 1e-12:
             source.to_mesh_clear()
@@ -550,13 +563,128 @@ def extract_mesh_arrays(context, obj, options, warnings,
             mod.show_viewport = True
 
 
+def weld_loops(arrays, scale: float, position_grid: float, uv_grid: float,
+               colours=None, extra_keys=(), direction_grid: float = 127.0):
+    """Split a mesh per loop, weld identical loops back, return the file's
+    per-vertex channels in game space.
+
+    Every one of these formats stores a single normal, UV and colour per
+    vertex, so a seam has to become two vertices - which is what "one
+    vertex per loop" gets us - and everything that did NOT need splitting
+    is then merged back by keying on the values the file can actually
+    tell apart.  `position_grid` / `uv_grid` are that precision: 1e5 for
+    the float32 layouts, 2048 for the half-float ones.
+
+    The tangent frame is deliberately not part of the key.  Blender
+    computes tangents per loop, so two loops the file considers one
+    vertex still carry slightly different tangents across a shared edge;
+    keying on them would give every triangle three private vertices and
+    triple the file.  One tangent per vertex is what the format means, so
+    the frames of the loops that collapse are averaged instead.
+
+    `colours` overrides arrays["colours"] (callers substitute white when
+    a mesh has no colour attribute); `extra_keys` adds columns that must
+    also distinguish vertices - .variant_part_mesh passes its bone pair
+    and weight, since two loops at the same place with different
+    influences are genuinely different vertices to that format.
+    """
+    loop_vidx = arrays["loop_vidx"]
+    positions = utils.blender_to_game(arrays["positions_pivot_rel"]) * scale
+    normals = utils.blender_to_game(arrays["normals"])
+    tangents = utils.blender_to_game(arrays["tangents"])
+    binormals = utils.blender_to_game(arrays["binormals"])
+    uv0 = utils.flip_uv_v(arrays["uv0"])
+    uv1 = (utils.flip_uv_v(arrays["uv1"]) if arrays["uv1"] is not None
+           else np.zeros_like(uv0))
+    if colours is None:
+        colours = arrays["colours"]
+
+    columns = [np.round(positions[loop_vidx] * position_grid),
+               np.round(normals * direction_grid),
+               np.round(uv0 * uv_grid),
+               np.round(uv1 * uv_grid),
+               np.round(colours * 255.0)]
+    columns.extend(extra_keys)
+    key = np.concatenate(columns, axis=1).astype(np.int64)
+    _, first, inverse = np.unique(key, axis=0, return_index=True,
+                                  return_inverse=True)
+    inverse = inverse.reshape(-1)
+    count = len(first)
+
+    def per_vertex(values):
+        """Channels that are part of the weld key: every loop in a group
+        holds the same value to the key's precision, so any one of them
+        is representative."""
+        out = np.zeros((count, values.shape[1]), np.float32)
+        out[inverse] = values
+        return out
+
+    def averaged(values, fallback):
+        """Channels that are not: average, then renormalize."""
+        out = np.zeros((count, values.shape[1]), np.float32)
+        np.add.at(out, inverse, values)
+        return utils.normalize_rows(out, fallback=fallback)
+
+    tris = inverse[arrays["tri_loops"].reshape(-1)].reshape(-1, 3)
+    if not arrays["mirrored"]:
+        # The Blender->game map is a reflection (det -1), flipping
+        # orientation once, so winding is reversed to compensate. An
+        # object's own mirrored (negative-determinant) transform flips a
+        # second time and the two cancel out.
+        tris = utils.reverse_winding(tris)
+
+    return {
+        "count": count,
+        "source_vertex": loop_vidx[first],
+        "positions": positions[loop_vidx[first]],
+        "normals": averaged(normals, (0.0, 0.0, 1.0)),
+        "tangents": averaged(tangents, (1.0, 0.0, 0.0)),
+        "binormals": averaged(binormals, (0.0, 1.0, 0.0)),
+        "uv0": per_vertex(uv0),
+        "uv1": per_vertex(uv1),
+        "colours": per_vertex(colours),
+        "indices": tris.ravel(),
+    }
+
+
 # ---------------------------------------------------------------------------
 # Model building
 # ---------------------------------------------------------------------------
 
+SHOGUN2_WRITABLE_FORMATS = (rf.VF_STATIC, rf.VF_S2_POSITION_UV,
+                            rf.VF_S2_STATIC_NO_UV2, rf.VF_S2_STATIC_FLOAT)
+
+
+def _resolve_vertex_format_shogun2(settings, warnings, obj_name):
+    """Shogun 2 has no per-vertex skinning - a mesh is welded to a single
+    bone through the material's bone index - so the only question is which
+    of the unskinned layouts to write.  A mesh imported from Shogun 2
+    keeps the layout it came in with, because its material expects that
+    exact stride; anything else gets the common 32-byte static one."""
+    fmt = VERTEX_FORMAT_TO_INT.get(settings.vertex_format)
+    if fmt in (rf.VF_WEIGHTED, rf.VF_CINEMATIC):
+        warnings.append(
+            f"{obj_name}: Shogun 2 files have no per-vertex skinning; "
+            "exporting as Static and welding the mesh to its bone via the "
+            "material's bone index instead")
+        return rf.VF_STATIC
+    if fmt == rf.VF_S2_BOW_WAVE:
+        # Read-only layout: passthrough works only while the mesh is
+        # untouched, and encode_vertices raises otherwise.
+        return fmt
+    if fmt in SHOGUN2_WRITABLE_FORMATS:
+        return fmt
+    return rf.VF_STATIC
+
+
 def _resolve_vertex_format(settings, bone_map, me, warnings, obj_name,
                            format_override=None):
     choice = format_override or settings.vertex_format
+    # A mesh imported from .variant_part_mesh carries one of that format's
+    # layouts, which mean nothing here; fall back to Auto rather than
+    # raising when such an object is exported as .rigid_model_v2.
+    if choice not in VERTEX_FORMAT_TO_INT:
+        choice = "AUTO"
     if choice != "AUTO":
         fmt = VERTEX_FORMAT_TO_INT[choice]
         if fmt != rf.VF_STATIC and not bone_map:
@@ -600,6 +728,43 @@ def _resolve_matrix_index(obj, settings) -> int:
     return settings.matrix_index
 
 
+def _shogun2_material_from_settings(obj, settings, fmt: int, version: int,
+                                    extra: dict):
+    """Build the Shogun 2 material header for one object.
+
+    If the object came from a Shogun 2 file its original block was stashed
+    verbatim on import; reusing it keeps the fields we do not model (the
+    unidentified tail some material ids carry) intact.  Otherwise a fresh
+    default block is built.
+    """
+    raw = extra.get("s2_material_raw")
+    material_id = _resolve_material_id(settings, fmt)
+    mat = None
+    if raw and extra.get("s2_material_version") == version:
+        try:
+            blob = bytes.fromhex(raw)
+            mat = rf.Shogun2Material.parse(blob, 0, material_id, version,
+                                           len(blob))
+        except ValueError:
+            mat = None
+    if mat is None:
+        mat = rf.Shogun2Material.build(
+            version, material_id=material_id,
+            bone_index=_resolve_matrix_index(obj, settings))
+
+    mat.vertex_format = fmt
+    mat.model_name = (settings.model_name
+                      or utils.strip_blender_suffix(obj.name))
+    if settings.shader_name:
+        mat.shader_name = settings.shader_name
+    paths = [slot.path for slot in settings.textures if slot.path]
+    for i in range(len(mat.texture_paths)):
+        mat.texture_paths[i] = paths[i] if i < len(paths) else ""
+    if mat.bone_index is not None:
+        mat.bone_index = _resolve_matrix_index(obj, settings)
+    return mat
+
+
 def _material_from_settings(obj, settings, fmt: int, scale: float,
                             attach_points, options) -> rf.WeightedMaterial:
     extra = {}
@@ -608,6 +773,11 @@ def _material_from_settings(obj, settings, fmt: int, scale: float,
             extra = json.loads(settings.extra_json)
         except ValueError:
             extra = {}
+
+    version = int(options.get("version", "7"))
+    if version in rf.SHOGUN2_VERSIONS:
+        return _shogun2_material_from_settings(obj, settings, fmt, version,
+                                               extra)
 
     pivot_b = obj.matrix_world.translation
     mat = rf.WeightedMaterial(
@@ -673,8 +843,12 @@ def build_model(context, obj, options, attach_points, attach_names,
     try:
         me = arrays["mesh_for_weights"]
         bone_map = resolve_bone_map(obj, attach_names, warnings)
-        fmt = _resolve_vertex_format(settings, bone_map, me, warnings,
-                                     obj.name, vertex_format_override)
+        if int(options.get("version", "7")) in rf.SHOGUN2_VERSIONS:
+            fmt = _resolve_vertex_format_shogun2(settings, warnings,
+                                                 obj.name)
+        else:
+            fmt = _resolve_vertex_format(settings, bone_map, me, warnings,
+                                         obj.name, vertex_format_override)
         k = {rf.VF_WEIGHTED: 2, rf.VF_CINEMATIC: 4}.get(fmt, 0)
 
         if k:
@@ -856,6 +1030,10 @@ def _export_lods(context, root, lods, filepath: str, options: dict):
             [best], max(2, options.get("auto_lod_count", 4)), overrides)
 
     version = int(options.get("version", "7"))
+    if version in rf.SHOGUN2_VERSIONS:
+        # Shogun 2 stores vertices in the bone's space; see
+        # extract_mesh_arrays.
+        options = dict(options, bone_local_space=True)
     skeleton = options.get("skeleton_name", "")
     if not skeleton and root is not None:
         skeleton = root.rmv2.skeleton_name

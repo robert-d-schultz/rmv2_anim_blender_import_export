@@ -32,7 +32,11 @@ import numpy as np
 # Enums (kept as plain ints + name tables so the module has no bpy/enum deps)
 # ---------------------------------------------------------------------------
 
-SUPPORTED_VERSIONS = (5, 6, 7, 8)
+# Versions 1 and 2 are Shogun 2 and have a different header, common-header
+# and material layout to the Rome 2+ versions - see _load_shogun2.
+SHOGUN2_VERSIONS = (1, 2)
+
+SUPPORTED_VERSIONS = (1, 2, 5, 6, 7, 8)
 
 # VertexFormat
 VF_STATIC = 0
@@ -43,6 +47,14 @@ VF_POSITION16 = 5
 VF_CUSTOM_TERRAIN = 6
 VF_CUSTOM_TERRAIN2 = 13
 
+# Shogun 2 materials carry no vertex-format field, so these are not game
+# enum values - they are our own ids for the layouts stride identifies.
+# Numbered from 100 to stay clear of the real enum.
+VF_S2_POSITION_UV = 100   # stride 12: half4 position + half2 uv
+VF_S2_STATIC_NO_UV2 = 101  # stride 28: Static without the second uv
+VF_S2_STATIC_FLOAT = 102  # stride 44: Static with float32 position and uvs
+VF_S2_BOW_WAVE = 103      # stride 24: two half4 positions + uv + a float
+
 VERTEX_FORMAT_NAMES = {
     VF_STATIC: "Static",
     VF_COLLISION: "Collision",
@@ -51,6 +63,10 @@ VERTEX_FORMAT_NAMES = {
     VF_POSITION16: "Position16_bit",
     VF_CUSTOM_TERRAIN: "CustomTerrain",
     VF_CUSTOM_TERRAIN2: "CustomTerrain2",
+    VF_S2_POSITION_UV: "Shogun2_PositionUV",
+    VF_S2_STATIC_NO_UV2: "Shogun2_Static",
+    VF_S2_STATIC_FLOAT: "Shogun2_StaticFloat",
+    VF_S2_BOW_WAVE: "Shogun2_BowWave",
 }
 
 # ModelMaterialEnum (ushort in the file)
@@ -131,6 +147,10 @@ TEXTURE_TYPE_NAMES = {
     29: "MaterialMap",
 }
 
+TEXTURE_TYPE_DIFFUSE = 0
+TEXTURE_TYPE_NORMAL = 1
+TEXTURE_TYPE_AMBIENT_OCCLUSION = 5
+
 # Well known material parameter slots (WeightedParamterIds in the C# code)
 FLOAT_PARAM_UV_SCALE_X = 0
 FLOAT_PARAM_UV_SCALE_Y = 1
@@ -156,8 +176,20 @@ _TEXTURE = struct.Struct("<i256s")                       # 260
 _TERRAIN_TILE_MATERIAL = struct.Struct("<64s6I")         # 88
 _CUSTOM_TERRAIN_MATERIAL = struct.Struct("<256s")        # 256
 
+# Shogun 2 (v1/v2).  The file header carries no name - the skeleton name
+# is a 512-byte UTF-16 field *after* the lod table, preceded by a u32 that
+# is 0 in every file seen so far.  The common header is the first 48 bytes
+# of the modern one (the three shader-name fields do not exist yet).
+_S2_FILE_HEADER = struct.Struct("<4sII")                 # 12
+_S2_COMMON_HEADER = struct.Struct("<HHIIIII6f")          # 48
+_S2_NAME_SIZE = 512                                      # 256 UTF-16 chars
+_S2_STR32 = 64                                           # 32 UTF-16 chars
+_S2_STR256 = 512                                         # 256 UTF-16 chars
+
 assert _FILE_HEADER.size == 140
 assert _COMMON_HEADER.size == 80
+assert _S2_FILE_HEADER.size == 12
+assert _S2_COMMON_HEADER.size == 48
 assert _WEIGHTED_MATERIAL.size == 860
 assert _ATTACHMENT_POINT.size == 84
 assert _TEXTURE.size == 260
@@ -178,6 +210,19 @@ def _decode_fixed_string(raw: bytes) -> str:
 
 def _encode_fixed_string(value: str, length: int) -> bytes:
     raw = value.encode("utf-8", errors="replace")[:length]
+    return raw.ljust(length, b"\0")
+
+
+def _decode_fixed_utf16(raw: bytes) -> str:
+    """Zero padded fixed length UTF-16LE string (Shogun 2 convention)."""
+    text = raw.decode("utf-16-le", errors="replace")
+    return text.split("\0", 1)[0]
+
+
+def _encode_fixed_utf16(value: str, length: int) -> bytes:
+    raw = value.encode("utf-16-le", errors="replace")[:length]
+    if len(raw) % 2:                    # never split a UTF-16 code unit
+        raw = raw[:-1]
     return raw.ljust(length, b"\0")
 
 
@@ -377,6 +422,22 @@ def _vertex_dtype(vertex_format: int, version: int) -> np.dtype:
         fields = [("pos", "<f4", (4,)), ("normal", "<f4", (4,)),
                   ("uv", "<f2", (2,)), ("col0", "u1", (4,)),
                   ("col1", "u1", (4,)), ("col2", "u1", (4,))]
+    elif vertex_format == VF_S2_POSITION_UV:
+        fields = [("pos", "<f2", (4,)), ("uv", "<f2", (2,))]
+    elif vertex_format == VF_S2_STATIC_NO_UV2:
+        fields = [("pos", "<f2", (4,)), ("uv", "<f2", (2,)),
+                  ("normal", "u1", (4,)), ("tangent", "u1", (4,)),
+                  ("binormal", "u1", (4,)), ("col", "u1", (4,))]
+    elif vertex_format == VF_S2_STATIC_FLOAT:
+        fields = [("pos", "<f4", (3,)), ("uv", "<f4", (2,)),
+                  ("uv2", "<f4", (2,)), ("normal", "u1", (4,)),
+                  ("tangent", "u1", (4,)), ("binormal", "u1", (4,)),
+                  ("col", "u1", (4,))]
+    elif vertex_format == VF_S2_BOW_WAVE:
+        # The second position is where the wave crest travels to; it has
+        # no equivalent in RmvMeshData and is preserved via raw_block.
+        fields = [("pos", "<f2", (4,)), ("pos2", "<f2", (4,)),
+                  ("uv", "<f2", (2,)), ("unknown", "<f4")]
     else:
         raise RmvFormatError(
             f"Unsupported vertex format {vertex_format} "
@@ -433,6 +494,28 @@ def decode_vertices(buf: bytes, offset: int, count: int, stride: int,
         if k:
             mesh.bone_indices = raw["bidx"].copy()
             mesh.bone_weights = raw["bwgt"].astype(np.float32) / 255.0
+    elif vertex_format in (VF_S2_POSITION_UV, VF_S2_STATIC_NO_UV2,
+                           VF_S2_STATIC_FLOAT, VF_S2_BOW_WAVE):
+        # Shogun 2 layouts.  Like the modern Static vertex these store the
+        # tangent frame X/Z swapped - verified by comparing the stored
+        # normals against normals computed from the triangle geometry.
+        if vertex_format == VF_S2_STATIC_FLOAT:
+            mesh.positions = np.asarray(raw["pos"], np.float32).copy()
+        else:
+            mesh.positions = _decode_position_half4(raw["pos"])
+        mesh.uv0 = raw["uv"].astype(np.float32)
+        if "uv2" in names:
+            mesh.uv1 = raw["uv2"].astype(np.float32)
+        if "normal" in names:
+            mesh.normals = _decode_byte_vec(raw["normal"])[:, ::-1].copy()
+            mesh.tangents = _decode_byte_vec(raw["tangent"])[:, ::-1].copy()
+            mesh.binormals = \
+                _decode_byte_vec(raw["binormal"])[:, ::-1].copy()
+        if "col" in names:
+            mesh.colours = raw["col"].astype(np.float32) / 255.0
+        else:
+            mesh.colours = np.tile(
+                np.array([0.0, 0.0, 0.0, 1.0], np.float32), (count, 1))
     elif vertex_format in (VF_COLLISION, VF_POSITION16):
         mesh.positions = _decode_position_float(raw["pos"])
     elif vertex_format in (VF_CUSTOM_TERRAIN, VF_CUSTOM_TERRAIN2):
@@ -446,6 +529,33 @@ def decode_vertices(buf: bytes, offset: int, count: int, stride: int,
     mesh.raw_format = vertex_format
     mesh.raw_version = version
     return mesh
+
+
+def _encode_vertices_shogun2(mesh: RmvMeshData, raw: np.ndarray,
+                             dt: np.dtype, vertex_format: int,
+                             high_precision: bool) -> bytes:
+    """Encode the Shogun 2 vertex layouts.  The tangent frame is stored
+    X/Z swapped, exactly as in the modern Static vertex (see
+    decode_vertices).  VF_S2_BOW_WAVE is not handled here: it carries a
+    second position channel RmvMeshData has nowhere to put, so it stays
+    read-only and relies on raw_block passthrough."""
+    names = dt.names
+    if vertex_format == VF_S2_STATIC_FLOAT:
+        raw["pos"] = np.asarray(mesh.positions, np.float32)
+        raw["uv"] = np.asarray(mesh.uv0, np.float32)
+        raw["uv2"] = np.asarray(mesh.uv1, np.float32)
+    else:
+        raw["pos"] = encode_position_half4(mesh.positions, high_precision)
+        raw["uv"] = mesh.uv0.astype(np.float16)
+
+    if "normal" in names:
+        raw["normal"] = _encode_byte_vec(mesh.normals[:, ::-1])
+        raw["tangent"] = _encode_byte_vec(mesh.tangents[:, ::-1])
+        raw["binormal"] = _encode_byte_vec(mesh.binormals[:, ::-1])
+    if "col" in names:
+        raw["col"] = np.clip(
+            np.round(mesh.colours * 255.0), 0, 255).astype(np.uint8)
+    return raw.tobytes()
 
 
 def encode_vertices(mesh: RmvMeshData, vertex_format: int, version: int,
@@ -466,6 +576,11 @@ def encode_vertices(mesh: RmvMeshData, vertex_format: int, version: int,
     n = mesh.vertex_count
     raw = np.zeros(n, dtype=dt)
     names = dt.names
+
+    if vertex_format in (VF_S2_POSITION_UV, VF_S2_STATIC_NO_UV2,
+                         VF_S2_STATIC_FLOAT):
+        return _encode_vertices_shogun2(mesh, raw, dt, vertex_format,
+                                        high_precision)
 
     if vertex_format not in (VF_STATIC, VF_WEIGHTED, VF_CINEMATIC):
         raise RmvFormatError(
@@ -744,6 +859,184 @@ class CustomTerrainMaterial:
             _encode_fixed_string(self.texture_path, 256))
 
 
+@dataclass
+class Shogun2Material:
+    """Material header used by Shogun 2 files (RMV2 v1 and v2).
+
+    Shogun 2 predates the tagged texture/parameter lists of the modern
+    format: a material is a run of fixed-width, zero-padded UTF-16LE
+    fields whose exact composition depends on the material id.
+
+        v2 only     shader name     64 bytes  ("rigid_default")
+        (not id 22) model name      64 bytes  ("display_hull_LOD1")
+                    texture paths   512 bytes each, 0..n of them
+        optional    tail            a trailing i32 bone index, and for
+                                    some ids 8 further unidentified bytes
+
+    Only a handful of material ids have been seen, so rather than assume
+    a table that vanilla files would immediately violate, the block is
+    kept verbatim in `raw` and the field boundaries are derived from its
+    length.  write() patches the understood fields back into `raw`, which
+    keeps re-saving an unmodified file byte-identical whatever the id.
+    """
+    material_id: int = 21
+    vertex_format: int = VF_STATIC
+    version: int = 2
+    raw: bytes = b""
+    model_name: str = ""
+    shader_name: str = ""
+    texture_paths: list = field(default_factory=list)   # [str]
+    # -1 = not attached to a bone.  None = this material has no bone field.
+    bone_index: Optional[int] = None
+    # Byte offsets into `raw` for the fields we understand, so write() can
+    # patch them back without having to re-derive the layout, plus the
+    # values as first parsed.  CA's fixed-width fields often keep junk
+    # after the terminator (the tail of a longer name that was overwritten
+    # in place), so an unchanged field is left exactly as it was rather
+    # than re-encoded and zero-padded.
+    _offsets: dict = field(default_factory=dict)
+    _original: dict = field(default_factory=dict)
+
+    # Interface parity with WeightedMaterial ------------------------------
+    pivot: tuple = (0.0, 0.0, 0.0)
+    attachment_points: list = field(default_factory=list)
+    string_params: list = field(default_factory=list)
+    float_params: list = field(default_factory=list)
+    int_params: list = field(default_factory=list)
+    vec4_params: list = field(default_factory=list)
+    filters: str = ""
+    parent_matrix_index: int = -1
+
+    @property
+    def matrix_index(self) -> int:
+        """The single bone this mesh rides on, or -1 when unattached.
+
+        Shogun 2 has no per-vertex skinning in this format; a mesh is
+        rigidly parented to one bone, which is exactly what the modern
+        format calls matrix_index.
+        """
+        return -1 if self.bone_index is None else self.bone_index
+
+    @matrix_index.setter
+    def matrix_index(self, value: int):
+        if self.bone_index is not None:
+            self.bone_index = int(value)
+
+    @property
+    def texture_directory(self) -> str:
+        return self.texture_paths[0] if self.texture_paths else ""
+
+    @property
+    def textures(self) -> list:
+        """The texture paths as (type, path) pairs, for parity with the
+        modern material.
+
+        Shogun 2 stores no type tag: a mesh names a texture *set* and the
+        engine appends _diffuse/_normal/_gloss_map to it.  In the files
+        seen, slot 0 is that set and slot 1 (ship materials only) is an
+        ambient occlusion map; slots beyond that were always empty and are
+        reported untyped.  Empty slots are skipped.
+        """
+        slots = (TEXTURE_TYPE_DIFFUSE, TEXTURE_TYPE_AMBIENT_OCCLUSION)
+        out = []
+        for i, path in enumerate(self.texture_paths):
+            if path:
+                out.append((slots[i] if i < len(slots) else -1, path))
+        return out
+
+    def get_texture(self, texture_type: int) -> Optional[str]:
+        for ttype, path in self.textures:
+            if ttype == texture_type:
+                return path
+        return None
+
+    def get_int_param(self, index: int):
+        return None
+
+    def compute_size(self) -> int:
+        return len(self.raw)
+
+    @staticmethod
+    def build(version: int, material_id: int = 21, model_name: str = "",
+              shader_name: str = "rigid_default",
+              texture_paths=(), bone_index: Optional[int] = -1,
+              texture_slots: int = 2) -> "Shogun2Material":
+        """Create a material block from scratch (for meshes authored in
+        Blender rather than loaded from a file).
+
+        The default shape - shader + model name, two texture slots and a
+        bone index - is what vanilla material 21 uses, the one animated
+        props are built from.  Pass bone_index=None for the ids that have
+        no bone field at all (32 and friends).
+        """
+        blob = bytearray()
+        if version == 2:
+            blob += _encode_fixed_utf16(shader_name, _S2_STR32)
+        blob += _encode_fixed_utf16(model_name, _S2_STR32)
+        paths = list(texture_paths)[:texture_slots]
+        paths += [""] * (texture_slots - len(paths))
+        for path in paths:
+            blob += _encode_fixed_utf16(path, _S2_STR256)
+        if bone_index is not None:
+            blob += struct.pack("<i", bone_index)
+        return Shogun2Material.parse(bytes(blob), 0, material_id, version,
+                                     len(blob))
+
+    @staticmethod
+    def parse(buf: bytes, offset: int, material_id: int, version: int,
+              size: int) -> "Shogun2Material":
+        raw = bytes(buf[offset:offset + size])
+        mat = Shogun2Material(material_id=material_id, version=version,
+                              raw=raw)
+        pos = 0
+
+        def take_str(key: str, width: int) -> str:
+            nonlocal pos
+            value = _decode_fixed_utf16(raw[pos:pos + width])
+            mat._offsets[key] = pos
+            mat._original[key] = value
+            pos += width
+            return value
+
+        # Material 22 (bow_wave) carries a shader name and nothing else;
+        # every other id seen starts with the model name in v1 and with
+        # shader + model name in v2.
+        if version == 2 and size >= _S2_STR32:
+            mat.shader_name = take_str("shader_name", _S2_STR32)
+        if size - pos >= _S2_STR32:
+            mat.model_name = take_str("model_name", _S2_STR32)
+
+        for i in range((size - pos) // _S2_STR256):
+            mat.texture_paths.append(take_str(f"texture{i}", _S2_STR256))
+
+        # Whatever is left is the tail.  The bone index is its first i32
+        # in every sample; the 8 extra bytes material 54 carries after it
+        # are always zero and stay untouched inside `raw`.
+        if size - pos >= 4:
+            mat.bone_index = struct.unpack_from("<i", raw, pos)[0]
+            mat._offsets["bone_index"] = pos
+            mat._original["bone_index"] = mat.bone_index
+        return mat
+
+    def write(self) -> bytes:
+        out = bytearray(self.raw)
+
+        def put_str(key: str, value: str, width: int):
+            at = self._offsets.get(key)
+            if at is None or self._original.get(key) == value:
+                return          # unchanged: keep the bytes CA wrote
+            out[at:at + width] = _encode_fixed_utf16(value, width)
+
+        put_str("shader_name", self.shader_name, _S2_STR32)
+        put_str("model_name", self.model_name, _S2_STR32)
+        for i, path in enumerate(self.texture_paths):
+            put_str(f"texture{i}", path, _S2_STR256)
+        at = self._offsets.get("bone_index")
+        if at is not None and self.bone_index is not None:
+            struct.pack_into("<i", out, at, self.bone_index)
+        return bytes(out)
+
+
 def _parse_material(buf: bytes, offset: int, material_id: int,
                     expected_size: int):
     """Dispatch like MaterialFactory: terrain ids get their own headers,
@@ -782,6 +1075,17 @@ class RmvModel:
     # unmodified files keep their original values.
     bbox_min: Optional[tuple] = None
     bbox_max: Optional[tuple] = None
+    # Shogun 2 non-renderable meshes declare a vertex count but ship no
+    # vertex block; None means "use the mesh's real count" (the normal
+    # case).  See _load_shogun2_model.
+    declared_vertex_count: Optional[int] = None
+
+    @property
+    def written_vertex_count(self) -> int:
+        if self.declared_vertex_count is not None and \
+                not self.mesh.vertex_count:
+            return self.declared_vertex_count
+        return self.mesh.vertex_count
 
     def computed_bbox(self) -> tuple:
         if self.bbox_min is not None and self.bbox_max is not None:
@@ -819,6 +1123,13 @@ class RmvLod:
     # EXPORT_SIGNATURE instead - this field exists so loaded values are
     # available to inspect/debug, not because save() round-trips them.
     padding: tuple = (0, 0, 0)
+    # Shogun 2 only.  The lod header's total vertex/index byte counts are
+    # normally just the sum of the meshes' blocks and are recomputed on
+    # save, but some CA materials ship them deliberately zeroed (bow_wave)
+    # even though real geometry follows.  When a loaded file disagrees
+    # with its own geometry the declared pair is kept here and written
+    # back verbatim, so such files re-save byte-identically.
+    declared_sizes: Optional[tuple] = None
 
 
 @dataclass
@@ -826,6 +1137,13 @@ class RmvFile:
     version: int = 7
     skeleton_name: str = ""
     lods: list = field(default_factory=list)
+    # Shogun 2 only: the u32 between the lod table and the skeleton name.
+    # Zero in every file seen; kept so re-saving stays byte-identical.
+    unknown_s2: int = 0
+
+    @property
+    def is_shogun2(self) -> bool:
+        return self.version in SHOGUN2_VERSIONS
 
 
 # ---------------------------------------------------------------------------
@@ -896,11 +1214,113 @@ def _load_model(buf: bytes, offset: int, version: int) -> tuple[RmvModel, int]:
     return model, mesh_section_size
 
 
+# Shogun 2 materials carry no vertex-format field, so the layout has to be
+# identified by stride.  Every stride occurring in the vanilla packs is
+# listed here; stride 32 happens to coincide with the modern static vertex.
+_S2_FORMAT_BY_STRIDE = {
+    12: VF_S2_POSITION_UV,
+    24: VF_S2_BOW_WAVE,
+    28: VF_S2_STATIC_NO_UV2,
+    32: VF_STATIC,
+    44: VF_S2_STATIC_FLOAT,
+}
+
+
+def _shogun2_vertex_format(stride: int, material_id: int) -> int:
+    try:
+        return _S2_FORMAT_BY_STRIDE[stride]
+    except KeyError:
+        raise RmvFormatError(
+            f"Unknown Shogun 2 vertex stride {stride} "
+            f"(material {material_id})") from None
+
+
+def _load_shogun2_model(buf: bytes, offset: int,
+                        version: int) -> tuple[RmvModel, int]:
+    vals = _S2_COMMON_HEADER.unpack_from(buf, offset)
+    (material_id, render_flag, mesh_section_size, vertex_offset,
+     vertex_count, index_offset, index_count) = vals[0:7]
+    bbox = vals[7:13]
+
+    material_offset = offset + _S2_COMMON_HEADER.size
+    material = Shogun2Material.parse(
+        buf, material_offset, material_id, version,
+        (offset + vertex_offset) - material_offset)
+
+    stride = ((index_offset - vertex_offset) // vertex_count
+              if vertex_count else 0)
+    if vertex_count > 0 and stride > 0:
+        material.vertex_format = _shogun2_vertex_format(stride, material_id)
+        mesh = decode_vertices(buf, offset + vertex_offset, vertex_count,
+                               stride, material.vertex_format, version)
+    else:
+        # Non-renderable meshes (materials 26 and 45) declare a vertex
+        # count but store no vertex block at all - the index data starts
+        # where the vertices would.  Keep the declared count so the file
+        # re-saves unchanged.
+        mesh = RmvMeshData.empty(0, 0)
+
+    usable = (index_count // 3) * 3
+    mesh.indices = np.frombuffer(
+        buf, dtype="<u2", count=usable, offset=offset + index_offset).copy()
+
+    model = RmvModel(
+        material=material,
+        mesh=mesh,
+        render_flag=render_flag,
+        shader_name=material.shader_name,
+        bbox_min=tuple(bbox[0:3]),
+        bbox_max=tuple(bbox[3:6]),
+        declared_vertex_count=(vertex_count if not mesh.vertex_count
+                               else None),
+    )
+    return model, mesh_section_size
+
+
+def _load_shogun2(data: bytes, version: int) -> RmvFile:
+    """Parse a Shogun 2 (v1/v2) file.  See _S2_FILE_HEADER for the layout
+    differences against v5+."""
+    magic, version, lod_count = _S2_FILE_HEADER.unpack_from(data, 0)
+    if lod_count > 100:
+        raise RmvFormatError(f"Implausible lod count {lod_count}")
+
+    pos = _S2_FILE_HEADER.size
+    lod_headers = []
+    for _ in range(lod_count):
+        mesh_count, vsize, isize, first, camera = \
+            _LOD_HEADER_V5_V6.unpack_from(data, pos)
+        pos += _LOD_HEADER_V5_V6.size
+        lod_headers.append((mesh_count, first, camera, (vsize, isize)))
+
+    (unknown,) = struct.unpack_from("<I", data, pos)
+    pos += 4
+    skeleton = _decode_fixed_utf16(data[pos:pos + _S2_NAME_SIZE])
+
+    rmv = RmvFile(version=version, skeleton_name=skeleton,
+                  unknown_s2=unknown)
+    for i, (mesh_count, first, camera, declared) in enumerate(lod_headers):
+        lod = RmvLod(camera_distance=camera, lod_level=i)
+        offset = first
+        actual_vertex = actual_index = 0
+        for _ in range(mesh_count):
+            model, section_size = _load_shogun2_model(data, offset, version)
+            lod.models.append(model)
+            offset += section_size
+            actual_vertex += (model.mesh.vertex_count
+                              * vertex_stride(model.material.vertex_format,
+                                              version))
+            actual_index += len(model.mesh.indices) * 2
+        if declared != (actual_vertex, actual_index):
+            lod.declared_sizes = declared
+        rmv.lods.append(lod)
+    return rmv
+
+
 def load(data: bytes) -> RmvFile:
     """Parse a .rigid_model_v2 file from bytes."""
     if len(data) < _FILE_HEADER.size:
         raise RmvFormatError("File too small to be a RMV2 file")
-    magic, version, lod_count, skeleton = _FILE_HEADER.unpack_from(data, 0)
+    magic, version = struct.unpack_from("<4sI", data, 0)
     if magic != b"RMV2":
         raise RmvFormatError(
             f"Not a RigidModel v2 file (magic {magic!r}, expected b'RMV2')")
@@ -908,7 +1328,10 @@ def load(data: bytes) -> RmvFile:
         raise RmvFormatError(
             f"Unsupported RMV2 version {version} "
             f"(supported: {SUPPORTED_VERSIONS})")
+    if version in SHOGUN2_VERSIONS:
+        return _load_shogun2(data, version)
 
+    magic, version, lod_count, skeleton = _FILE_HEADER.unpack_from(data, 0)
     rmv = RmvFile(version=version,
                   skeleton_name=_decode_fixed_string(skeleton))
 
@@ -953,6 +1376,80 @@ def load(data: bytes) -> RmvFile:
 # Saving
 # ---------------------------------------------------------------------------
 
+def _save_shogun2(rmv: RmvFile, high_precision: bool,
+                  verify: bool) -> bytes:
+    """Serialize a Shogun 2 (v1/v2) file."""
+    version = rmv.version
+    header_block = (_S2_FILE_HEADER.size
+                    + _LOD_HEADER_V5_V6.size * len(rmv.lods)
+                    + 4 + _S2_NAME_SIZE)
+
+    encoded = []
+    for lod in rmv.lods:
+        lod_entries = []
+        for model in lod.models:
+            mat = model.material
+            if not isinstance(mat, Shogun2Material):
+                raise RmvFormatError(
+                    f"Shogun 2 files need Shogun2Material headers, got "
+                    f"{type(mat).__name__} - a model imported from a "
+                    f"Rome 2+ file cannot be exported as v{version} "
+                    f"without conversion")
+            vertex_blob = encode_vertices(model.mesh, mat.vertex_format,
+                                          version, high_precision)
+            index_blob = model.mesh.indices.astype("<u2").tobytes()
+            lod_entries.append(
+                (model, mat.write(), vertex_blob, index_blob))
+        encoded.append(lod_entries)
+
+    out = bytearray()
+    out += _S2_FILE_HEADER.pack(b"RMV2", version, len(rmv.lods))
+
+    running = header_block
+    for lod, entries in zip(rmv.lods, encoded):
+        total_vertex = sum(len(e[2]) for e in entries)
+        total_index = sum(len(e[3]) for e in entries)
+        if lod.declared_sizes is not None:
+            total_vertex, total_index = lod.declared_sizes
+        out += _LOD_HEADER_V5_V6.pack(len(entries), total_vertex,
+                                      total_index, running,
+                                      lod.camera_distance)
+        for model, material_blob, vertex_blob, index_blob in entries:
+            running += (_S2_COMMON_HEADER.size + len(material_blob)
+                        + len(vertex_blob) + len(index_blob))
+
+    out += struct.pack("<I", rmv.unknown_s2)
+    out += _encode_fixed_utf16(rmv.skeleton_name, _S2_NAME_SIZE)
+
+    for lod, entries in zip(rmv.lods, encoded):
+        for model, material_blob, vertex_blob, index_blob in entries:
+            vertex_offset = _S2_COMMON_HEADER.size + len(material_blob)
+            index_offset = vertex_offset + len(vertex_blob)
+            section_size = index_offset + len(index_blob)
+            bbox_min, bbox_max = model.computed_bbox()
+
+            out += _S2_COMMON_HEADER.pack(
+                model.material.material_id & 0xFFFF,
+                model.render_flag & 0xFFFF,
+                section_size,
+                vertex_offset,
+                model.written_vertex_count,
+                index_offset,
+                len(model.mesh.indices),
+                *[float(v) for v in bbox_min],
+                *[float(v) for v in bbox_max])
+            out += material_blob
+            out += vertex_blob
+            out += index_blob
+
+    blob = bytes(out)
+    if verify:
+        reloaded = load(blob)
+        if len(reloaded.lods) != len(rmv.lods):
+            raise RmvFormatError("Save verification failed (lod count)")
+    return blob
+
+
 def save(rmv: RmvFile, high_precision: bool = True,
          verify: bool = True) -> bytes:
     """Serialize an RmvFile to bytes.
@@ -964,6 +1461,8 @@ def save(rmv: RmvFile, high_precision: bool = True,
     version = rmv.version
     if version not in SUPPORTED_VERSIONS:
         raise RmvFormatError(f"Unsupported RMV2 version {version}")
+    if version in SHOGUN2_VERSIONS:
+        return _save_shogun2(rmv, high_precision, verify)
 
     lod_struct = _lod_header_struct(version)
     header_block = _FILE_HEADER.size + lod_struct.size * len(rmv.lods)

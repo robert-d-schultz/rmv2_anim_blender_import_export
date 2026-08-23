@@ -33,6 +33,7 @@ hierarchy, so world positions match the converted meshes.
 
 from __future__ import annotations
 
+import json
 import os
 
 import bpy
@@ -376,7 +377,12 @@ def _store_metadata(arm_obj, anim: af.AnimFile):
         s.skeleton_name = anim.skeleton_name
     s.anim_version = anim.version
     s.anim_fps = anim.frame_rate
+    s.anim_header_type = anim.header_type
     s.flags = ", ".join(anim.flags)
+    # Shogun 2 carries its animation events (FIRE_TIME etc.) inside the
+    # .anim; keep them so a re-export does not silently drop them.
+    s.events_json = json.dumps([list(e) for e in anim.events]) \
+        if anim.events else ""
 
 
 # ---------------------------------------------------------------------------
@@ -637,12 +643,38 @@ def _parse_fallback_name(name: str):
 def _looks_like_bindpose(resolved: af.ResolvedAnim) -> bool:
     """Real bind-pose skeleton files carry 2-3 identical frames - they are
     structurally indistinguishable from a very short static animation, so
-    this is a heuristic, not a format marker."""
+    this is a heuristic, not a format marker.
+
+    Rome 2+ only: Shogun 2 has no separate bind-pose file convention at
+    all, so it is decided differently - see _shogun2_mode."""
     num_frames = len(resolved.translations)
     if not 1 <= num_frames <= 3:
         return False
+    return _is_static(resolved)
+
+
+def _is_static(resolved: af.ResolvedAnim) -> bool:
+    """True when every frame holds the same pose (no motion at all)."""
     return (np.allclose(resolved.translations, resolved.translations[:1])
             and np.allclose(resolved.rotations, resolved.rotations[:1]))
+
+
+def _shogun2_mode(arm_obj) -> str:
+    """Pick skeleton-vs-animation for a Shogun 2 file.
+
+    Shogun 2 has no `animations/skeletons/*.anim` equivalent: the bone
+    table with parents lives in *every* .anim, and a mesh names the .anim
+    it belongs to rather than the other way round.  The frame-count
+    heuristic used for Rome 2+ does not transfer either - across vanilla,
+    only 15 of the 138 .anim files that sit beside a mesh are static,
+    while 50 files in the animations tree are (static idles), so
+    "identical frames" separates neither group.
+
+    So the file itself carries no clue, and the scene decides: with no
+    armature to apply to, build one from frame 0; with one, key the frames
+    onto it.
+    """
+    return "ANIMATION" if arm_obj is not None else "SKELETON"
 
 
 def import_file(context, filepath: str, options: dict):
@@ -679,10 +711,17 @@ def import_file(context, filepath: str, options: dict):
 
     root_col, meshes, arm_obj = find_target(context)
 
+    is_shogun2 = anim.version in (af.SHOGUN2_VERSION,
+                                  af.SHOGUN2_NO_HEADER_VERSION)
+
     mode = options.get("mode")
     if mode is None:
-        mode = "SKELETON" if (is_building or _looks_like_bindpose(resolved)) \
-            else "ANIMATION"
+        if is_shogun2:
+            mode = _shogun2_mode(arm_obj)
+        else:
+            mode = "SKELETON" if (is_building
+                                  or _looks_like_bindpose(resolved)) \
+                else "ANIMATION"
 
     created = False
     if mode == "SKELETON":
@@ -727,9 +766,16 @@ def import_file(context, filepath: str, options: dict):
     # frames built above ARE the animation - key them immediately instead
     # of requiring a second, identical import once the armature exists.
     keyed = 0
-    if not created or is_building or (num_frames > 1
-                                      and options.get("import_animation",
-                                                      False)):
+    key_frames = (not created or is_building
+                  or (num_frames > 1
+                      and options.get("import_animation", False)))
+    # Shogun 2 is in the same boat as the ad-hoc "building" files: there is
+    # no separate skeleton file to import first, so a file that actually
+    # moves is both the armature source and the animation.
+    if created and is_shogun2 and num_frames > 1 \
+            and not _is_static(resolved):
+        key_frames = True
+    if key_frames:
         keyed = apply_animation(context, arm_obj, anim, resolved, stem,
                                 scale, warnings)
 

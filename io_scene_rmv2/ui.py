@@ -386,6 +386,15 @@ class COLLECTION_PT_rmv2(bpy.types.Panel):
             layout.prop(s, "version")
             layout.prop(s, "skeleton_name")
 
+            # The versions of the other containers a model can be written
+            # as.  Each exporter opens on the one recorded here, which is
+            # whatever the model was imported from.
+            other = layout.box()
+            other.label(text="Other Formats", icon="FILE_BLANK")
+            other.prop(s, "arm_version")
+            other.prop(s, "vmpf_version")
+            other.prop(s, "vwm_version")
+
             box = layout.box()
             box.label(text=f"Attachment Points ({len(s.attach_points)})",
                       icon="EMPTY_AXIS")
@@ -455,6 +464,7 @@ class ARMATURE_PT_rmv2(bpy.types.Panel):
         layout.prop(s, "anim_version")
         layout.prop(s, "anim_fps")
         layout.prop(s, "flags")
+        layout.prop(s, "anim_header_type")
 
 
 CLASSES = (

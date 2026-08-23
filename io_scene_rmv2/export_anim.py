@@ -19,6 +19,8 @@ t_game = (x, z, -y), q_game xyzw = (qx, qz, -qy, qw).
 
 from __future__ import annotations
 
+import json
+
 import numpy as np
 
 import bpy
@@ -102,9 +104,29 @@ def _sample_pose(arm_obj, pairs):
     return locs, quats
 
 
-def export_file(context, filepath: str, options: dict):
-    """Export to filepath. Returns (stats, warnings)."""
-    warnings: list[str] = []
+def _stored_events(arm_settings, warnings) -> list:
+    """The Shogun 2 event list kept on the armature at import time."""
+    raw = arm_settings.events_json
+    if not raw:
+        return []
+    try:
+        return [tuple(str(x) for x in event) for event in json.loads(raw)]
+    except (ValueError, TypeError):
+        warnings.append(
+            "Could not read the stored Shogun 2 animation events; "
+            "exporting without them")
+        return []
+
+
+def build_anim(context, options: dict, warnings: list):
+    """The AnimFile the selected armature and its pose would be written
+    as.
+
+    Split out of export_file so .rigid_model_animation - which embeds a
+    whole headerless .anim after its objects - can get at the animation
+    without going through a file of its own.  Returns
+    (anim, armature object, frame count).
+    """
     arm_obj = skeleton.find_context_armature(context)
     if arm_obj is None:
         raise AnimExportError("Select an armature to export a .anim")
@@ -179,14 +201,28 @@ def export_file(context, filepath: str, options: dict):
         translations=translations, rotations=rotations, flags=flags,
         duration=duration)
 
+    # Not every file has 1 here, so carry back whatever was imported.
+    anim.header_type = arm_settings.anim_header_type
+
+    if version in (af.SHOGUN2_VERSION, af.SHOGUN2_NO_HEADER_VERSION):
+        anim.events = _stored_events(arm_settings, warnings)
+
+    return anim, arm_obj, num_frames
+
+
+def export_file(context, filepath: str, options: dict):
+    """Export to filepath. Returns (stats, warnings)."""
+    warnings: list[str] = []
+    anim, _, num_frames = build_anim(context, options, warnings)
+
     blob = af.save(anim)
     with open(filepath, "wb") as handle:
         handle.write(blob)
 
     stats = {
-        "bones": bone_count,
+        "bones": len(anim.bones),
         "frames": num_frames,
-        "skeleton_name": skeleton_name,
+        "skeleton_name": anim.skeleton_name,
         "bytes": len(blob),
     }
     return stats, warnings

@@ -1,4 +1,6 @@
-"""File > Import / Export operators for .rigid_model_v2 and .anim."""
+"""File > Import / Export operators for .rigid_model_v2, .anim, the
+Shogun 2 rigid models and .variant_part_mesh, and the Empire/Napoleon
+.variant_weighted_mesh and .rigid_model_animation."""
 
 from __future__ import annotations
 
@@ -16,17 +18,48 @@ from bpy.props import (
 )
 from bpy_extras.io_utils import ExportHelper, ImportHelper
 
-from . import export_anim, export_rmv2, import_anim, import_rmv2, skeleton
+from . import (export_anim, export_arm, export_rma, export_rmv2,
+               export_vmpf, export_vwm, import_anim, import_arm,
+               import_rma, import_rmv2, import_vmpf, import_vwm,
+               skeleton)
 from .anim_format import AnimFormatError
-from .properties import VERSION_ITEMS, get_texture_root
+from .arm_format import ArmFormatError
+from .properties import (VERSION_ITEMS, VMPF_VERSION_ITEMS,
+                         VWM_VERSION_ITEMS, get_texture_root)
 from .rmv2_format import RmvFormatError
+from .vmpf_format import VmpfError
+from .vwm_format import VwmFormatError
 
 ANIM_VERSION_ITEMS = [
+    ("0", "Anim v0 (Shogun 2, headerless)",
+     "Shogun 2's second layout: no version field, three extra floats per "
+     "bone per frame. Only campaign pieces use it - prefer v1"),
+    ("1", "Anim v1 (Shogun 2)", "Shogun 2 era"),
     ("5", "Anim v5", "Rome 2 era"),
     ("6", "Anim v6", "Attila era"),
     ("7", "Anim v7", "Warhammer 1/2/3 era (the version AssetEditor and "
      "the games' modding pipelines expect)"),
+    ("8", "Anim v8", "Warhammer 3 era, and three quarters of its "
+     "animations. Each bone is packed at its own rate; AssetEditor reads "
+     "this version but will not write it"),
 ]
+
+
+def _prefill_version(operator, context, prop: str, items) -> None:
+    """Set an export operator's version from the model's own.
+
+    The importers record what they read on the root collection, so
+    re-exporting a file keeps its version unless the user says
+    otherwise.  Blender keeps operator properties between invocations,
+    so this runs on every invoke rather than only when unset - the same
+    trap the RMV2 exporter documents.
+    """
+    root, _ = export_rmv2.gather_lods(context, {"source": "AUTO"})
+    if root is None or not root.rmv2.is_rmv2_root:
+        return
+    value = str(getattr(root.rmv2, prop))
+    if value in {item[0] for item in items}:
+        setattr(operator, prop, value)
 
 
 class IMPORT_SCENE_OT_rmv2(bpy.types.Operator, ImportHelper):
@@ -381,7 +414,7 @@ class EXPORT_SCENE_OT_tw_anim(bpy.types.Operator, ExportHelper):
                 "(two identical frames, like the vanilla ones)")],
         default="ANIMATION")
     version: EnumProperty(
-        name="Version", items=ANIM_VERSION_ITEMS, default="7")
+        name="Version", items=ANIM_VERSION_ITEMS, default="8")
     skeleton_name: StringProperty(
         name="Skeleton", default="",
         description="Skeleton name for the header (e.g. humanoid01). "
@@ -403,6 +436,9 @@ class EXPORT_SCENE_OT_tw_anim(bpy.types.Operator, ExportHelper):
             stored = arm_obj.data.rmv2.skeleton_name
             name = stored or arm_obj.name
             self.skeleton_name = name
+            version = str(arm_obj.data.rmv2.anim_version)
+            if version in {item[0] for item in ANIM_VERSION_ITEMS}:
+                self.version = version
             directory = os.path.dirname(self.filepath) if self.filepath \
                 else ""
             self.filepath = os.path.join(directory, name + self.filename_ext)
@@ -447,9 +483,690 @@ class EXPORT_SCENE_OT_tw_anim(bpy.types.Operator, ExportHelper):
         return {"FINISHED"}
 
 
+class IMPORT_SCENE_OT_tw_arm(bpy.types.Operator, ImportHelper):
+    """Import a Shogun 2 rigid model
+    (.animatable_rigid_model, .rigid_model)"""
+    bl_idname = "import_scene.tw_arm"
+    bl_label = "Import Shogun 2 RigidModel"
+    bl_options = {"REGISTER", "UNDO"}
+
+    filename_ext = ".animatable_rigid_model"
+    # Blender silently drops filter_glob segments >= 16 chars, so the full
+    # "*.animatable_rigid_model" would never match and the browser would
+    # look empty. Both short patterns below stay under the limit and
+    # between them match the animatable form (which ends in an underscore
+    # before "rigid_model") and the plain one.
+    filter_glob: StringProperty(default="*_rigid_model;*.rigid_model",
+                                options={"HIDDEN"})
+    files: CollectionProperty(type=bpy.types.OperatorFileListElement,
+                              options={"HIDDEN", "SKIP_SAVE"})
+    directory: StringProperty(subtype="DIR_PATH",
+                              options={"HIDDEN", "SKIP_SAVE"})
+
+    build_materials: BoolProperty(
+        name="Build Materials",
+        description="Create Blender materials with image nodes for the "
+        "file's textures",
+        default=True)
+    texture_root: StringProperty(
+        name="Texture Root",
+        description="Folder with extracted game textures (overrides the "
+        "add-on preference)",
+        default="", subtype="DIR_PATH")
+    attach_armature: BoolProperty(
+        name="Attach To Selected Armature",
+        description="If an armature is selected (e.g. from importing the "
+        "matching .anim), bind each object to the bone its file entry "
+        "names, with a Child Of constraint",
+        default=True)
+    global_scale: FloatProperty(
+        name="Scale", default=1.0, min=0.0001, max=1000.0)
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = True
+        layout.use_property_decorate = False
+        layout.prop(self, "build_materials")
+        if self.build_materials:
+            layout.prop(self, "texture_root")
+        layout.prop(self, "attach_armature")
+        layout.prop(self, "global_scale")
+
+    def execute(self, context):
+        options = {
+            "build_materials": self.build_materials,
+            "texture_root": self.texture_root or get_texture_root(context),
+            "attach_armature": self.attach_armature,
+            "global_scale": self.global_scale,
+        }
+
+        filepaths = []
+        if self.files:
+            for entry in self.files:
+                if entry.name:
+                    filepaths.append(os.path.join(self.directory,
+                                                  entry.name))
+        if not filepaths and self.filepath:
+            filepaths = [self.filepath]
+
+        imported = 0
+        totals = {"meshes": 0, "vertices": 0, "triangles": 0}
+        for path in filepaths:
+            try:
+                _, stats, warnings = import_arm.import_file(
+                    context, path, options)
+            except (ArmFormatError, import_arm.ArmImportError) as exc:
+                self.report({"ERROR"}, f"{os.path.basename(path)}: {exc}")
+                continue
+            except Exception as exc:
+                traceback.print_exc()
+                self.report({"ERROR"},
+                            f"{os.path.basename(path)}: unexpected error: "
+                            f"{exc}")
+                continue
+            for warning in warnings:
+                self.report({"WARNING"}, warning)
+            imported += 1
+            for key in totals:
+                totals[key] += stats[key]
+
+        if imported == 0:
+            return {"CANCELLED"}
+        self.report(
+            {"INFO"},
+            f"Imported {imported} file(s): {totals['meshes']} objects, "
+            f"{totals['vertices']} vertices, {totals['triangles']} "
+            "triangles")
+        return {"FINISHED"}
+
+
+class EXPORT_SCENE_OT_tw_arm(bpy.types.Operator, ExportHelper):
+    """Export a Shogun 2 rigid model
+    (.animatable_rigid_model, .rigid_model)"""
+    bl_idname = "export_scene.tw_arm"
+    bl_label = "Export Shogun 2 RigidModel"
+    bl_options = {"REGISTER"}
+
+    filename_ext = ".animatable_rigid_model"
+    # See IMPORT_SCENE_OT_tw_arm for why these patterns are abbreviated.
+    filter_glob: StringProperty(default="*_rigid_model;*.rigid_model",
+                                options={"HIDDEN"})
+
+    source: EnumProperty(
+        name="Source",
+        items=[("AUTO", "Auto",
+                "Best LOD of the active model collection if there is one, "
+                "otherwise the selection"),
+               ("SELECTED", "Selected Objects", ""),
+               ("VISIBLE", "Visible Objects", "")],
+        default="AUTO")
+    arm_version: EnumProperty(
+        name="Version",
+        items=[("5", "Version 5", "The common vanilla object version"),
+               ("4", "Version 4", "Also occurs in vanilla"),
+               ("3", "Version 3",
+                "Shogun 2 era; carries no material parameter block"),
+               ("2", "Version 2",
+                "Three flagged texture names, no ao slot, and no second "
+                "UV set"),
+               ("1", "Version 1 (Empire/Napoleon)",
+                "One unflagged texture name and no second UV set"),
+               ("0", "Headerless (Empire)",
+                "No per-object magic or version, and no vertex colour "
+                "either - one vanilla file uses this")],
+        default="5")
+    apply_modifiers: BoolProperty(
+        name="Apply Modifiers", default=True,
+        description="Export the evaluated mesh")
+    global_scale: FloatProperty(
+        name="Scale", default=1.0, min=0.0001, max=1000.0)
+
+    def invoke(self, context, event):
+        _prefill_version(self, context, "arm_version", ARM_VERSION_ITEMS)
+        return ExportHelper.invoke(self, context, event)
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = True
+        layout.use_property_decorate = False
+        layout.prop(self, "source")
+        layout.prop(self, "arm_version")
+        layout.prop(self, "apply_modifiers")
+        layout.prop(self, "global_scale")
+
+    def execute(self, context):
+        options = {
+            "source": self.source,
+            "arm_version": int(self.arm_version),
+            "apply_modifiers": self.apply_modifiers,
+            "global_scale": self.global_scale,
+        }
+        try:
+            stats, warnings = export_arm.export_file(
+                context, self.filepath, options)
+        except (export_arm.ArmExportError, ArmFormatError) as exc:
+            self.report({"ERROR"}, str(exc))
+            return {"CANCELLED"}
+        except Exception as exc:
+            traceback.print_exc()
+            self.report({"ERROR"}, f"Unexpected error: {exc}")
+            return {"CANCELLED"}
+
+        for warning in warnings:
+            self.report({"WARNING"}, warning)
+        self.report(
+            {"INFO"},
+            f"Exported {stats['meshes']} objects, {stats['vertices']} "
+            f"vertices, {stats['triangles']} triangles "
+            f"({stats['bytes']:,} bytes)")
+        return {"FINISHED"}
+
+
+class IMPORT_SCENE_OT_tw_vmpf(bpy.types.Operator, ImportHelper):
+    """Import a Shogun 2 unit part (.variant_part_mesh)"""
+    bl_idname = "import_scene.tw_vmpf"
+    bl_label = "Import Shogun 2 Variant Part Mesh"
+    bl_options = {"REGISTER", "UNDO"}
+
+    filename_ext = ".variant_part_mesh"
+    # Blender silently drops filter_glob segments >= 16 characters, so the
+    # full "*.variant_part_mesh" would never match and the browser would
+    # look empty (see IMPORT_SCENE_OT_tw_arm for the same trap).
+    filter_glob: StringProperty(default="*_part_mesh", options={"HIDDEN"})
+    files: CollectionProperty(type=bpy.types.OperatorFileListElement,
+                              options={"HIDDEN", "SKIP_SAVE"})
+    directory: StringProperty(subtype="DIR_PATH",
+                              options={"HIDDEN", "SKIP_SAVE"})
+
+    attach_armature: BoolProperty(
+        name="Use Selected Armature",
+        description="Skin against the selected armature (import the "
+        "model's reference .anim first). Without one the bind pose is "
+        "rebuilt from the mesh itself, which is only approximate",
+        default=True)
+    import_lods: EnumProperty(
+        name="LODs",
+        items=[("ALL", "All", "Import every level of detail"),
+               ("FIRST", "Most detailed only",
+                "Import only the highest-detail level")],
+        default="ALL")
+    global_scale: FloatProperty(
+        name="Scale", default=1.0, min=0.0001, max=1000.0)
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = True
+        layout.use_property_decorate = False
+        layout.prop(self, "attach_armature")
+        layout.prop(self, "import_lods")
+        layout.prop(self, "global_scale")
+
+    def execute(self, context):
+        options = {
+            "attach_armature": self.attach_armature,
+            "import_lods": self.import_lods,
+            "global_scale": self.global_scale,
+        }
+
+        filepaths = []
+        if self.files:
+            for entry in self.files:
+                if entry.name:
+                    filepaths.append(os.path.join(self.directory, entry.name))
+        if not filepaths and self.filepath:
+            filepaths = [self.filepath]
+
+        imported = 0
+        skeletons = set()
+        totals = {"meshes": 0, "vertices": 0, "triangles": 0}
+        for path in filepaths:
+            try:
+                root, stats, warnings = import_vmpf.import_file(
+                    context, path, options)
+            except (VmpfError, import_vmpf.VmpfImportError) as exc:
+                self.report({"ERROR"}, f"{os.path.basename(path)}: {exc}")
+                continue
+            except Exception as exc:
+                traceback.print_exc()
+                self.report({"ERROR"},
+                            f"{os.path.basename(path)}: unexpected error: "
+                            f"{exc}")
+                continue
+            for warning in warnings:
+                self.report({"WARNING"}, warning)
+            imported += 1
+            if root.rmv2.skeleton_name:
+                skeletons.add(root.rmv2.skeleton_name)
+            for key in totals:
+                totals[key] += stats[key]
+
+        if imported == 0:
+            return {"CANCELLED"}
+        # The file names the skeleton it belongs to, so say which one
+        # rather than leaving the user to work it out from the folder.
+        suffix = (f"; skeleton: {', '.join(sorted(skeletons))}"
+                  if skeletons else "")
+        self.report(
+            {"INFO"},
+            f"Imported {imported} file(s): {totals['meshes']} objects, "
+            f"{totals['vertices']} vertices, {totals['triangles']} "
+            f"triangles{suffix}")
+        return {"FINISHED"}
+
+
+class EXPORT_SCENE_OT_tw_vmpf(bpy.types.Operator, ExportHelper):
+    """Export a Shogun 2 unit part (.variant_part_mesh)"""
+    bl_idname = "export_scene.tw_vmpf"
+    bl_label = "Export Shogun 2 Variant Part Mesh"
+    bl_options = {"REGISTER"}
+
+    filename_ext = ".variant_part_mesh"
+    filter_glob: StringProperty(default="*_part_mesh", options={"HIDDEN"})
+
+    source: EnumProperty(
+        name="Source",
+        items=[("AUTO", "Active Model", "The active model's LOD ladder"),
+               ("SELECTED", "Selected Objects", "Selected meshes only")],
+        default="AUTO")
+    apply_modifiers: BoolProperty(
+        name="Apply Modifiers",
+        description="Evaluate modifiers (the armature modifier is always "
+        "disabled first, so the rest pose is what gets written)",
+        default=True)
+    skeleton_name: StringProperty(
+        name="Skeleton",
+        description="Name of the skeleton this part belongs to, e.g. "
+        "man_shogun. Taken from the model's collection when left blank",
+        default="")
+    vmpf_version: EnumProperty(
+        name="Version", items=VMPF_VERSION_ITEMS, default="3")
+    global_scale: FloatProperty(
+        name="Scale", default=1.0, min=0.0001, max=1000.0)
+
+    def invoke(self, context, event):
+        _prefill_version(self, context, "vmpf_version", VMPF_VERSION_ITEMS)
+        return ExportHelper.invoke(self, context, event)
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = True
+        layout.use_property_decorate = False
+        layout.prop(self, "source")
+        layout.prop(self, "vmpf_version")
+        layout.prop(self, "apply_modifiers")
+        layout.prop(self, "skeleton_name")
+        layout.prop(self, "global_scale")
+
+    def execute(self, context):
+        options = {
+            "source": self.source,
+            "apply_modifiers": self.apply_modifiers,
+            "skeleton_name": self.skeleton_name,
+            "version": self.vmpf_version,
+            "global_scale": self.global_scale,
+            "auto_lods": False,
+        }
+        try:
+            stats, warnings = export_vmpf.export_file(
+                context, self.filepath, options)
+        except export_vmpf.VmpfExportError as exc:
+            self.report({"ERROR"}, str(exc))
+            return {"CANCELLED"}
+        except Exception as exc:
+            traceback.print_exc()
+            self.report({"ERROR"}, f"Unexpected error: {exc}")
+            return {"CANCELLED"}
+        for warning in warnings:
+            self.report({"WARNING"}, warning)
+        self.report(
+            {"INFO"},
+            f"Exported {stats['lods']} LOD(s), {stats['vertices']} "
+            f"vertices, {stats['triangles']} triangles, {stats['bytes']} "
+            "bytes")
+        return {"FINISHED"}
+
+
+class IMPORT_SCENE_OT_tw_vwm(bpy.types.Operator, ImportHelper):
+    """Import an Empire/Napoleon unit mesh (.variant_weighted_mesh)"""
+    bl_idname = "import_scene.tw_vwm"
+    bl_label = "Import Empire Unit Mesh"
+    bl_options = {"REGISTER", "UNDO"}
+
+    filename_ext = ".variant_weighted_mesh"
+    # Blender silently drops filter_glob segments >= 16 characters, so the
+    # full "*.variant_weighted_mesh" would never match and the browser
+    # would look empty (see IMPORT_SCENE_OT_tw_arm for the same trap).
+    filter_glob: StringProperty(default="*_weighted_mesh",
+                                options={"HIDDEN"})
+    files: CollectionProperty(type=bpy.types.OperatorFileListElement,
+                              options={"HIDDEN", "SKIP_SAVE"})
+    directory: StringProperty(subtype="DIR_PATH",
+                              options={"HIDDEN", "SKIP_SAVE"})
+
+    build_materials: BoolProperty(
+        name="Build Materials",
+        description="Create materials from the unit's textures. The file "
+        "names none, so they are looked up by convention as "
+        "unitmodels/textures/<unit>_diffuse.dds and friends",
+        default=True)
+    texture_root: StringProperty(
+        name="Texture Root",
+        description="Folder with extracted game textures (overrides the "
+        "add-on preference)",
+        default="", subtype="DIR_PATH")
+    global_scale: FloatProperty(
+        name="Scale", default=1.0, min=0.0001, max=1000.0)
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = True
+        layout.use_property_decorate = False
+        layout.label(text="Import the reference skeleton first:",
+                     icon="INFO")
+        layout.label(text=import_vwm.REFERENCE_SKELETON)
+        layout.prop(self, "build_materials")
+        if self.build_materials:
+            layout.prop(self, "texture_root")
+        layout.prop(self, "global_scale")
+
+    def execute(self, context):
+        options = {
+            "build_materials": self.build_materials,
+            "texture_root": self.texture_root or get_texture_root(context),
+            "global_scale": self.global_scale,
+        }
+
+        filepaths = []
+        if self.files:
+            for entry in self.files:
+                if entry.name:
+                    filepaths.append(os.path.join(self.directory, entry.name))
+        if not filepaths and self.filepath:
+            filepaths = [self.filepath]
+        # A unit's LODs are separate files that share one root
+        # collection, so import them finest-first and the ladder comes
+        # out in order however the browser sorted them.
+        filepaths.sort()
+
+        imported = 0
+        totals = {"meshes": 0, "vertices": 0, "triangles": 0,
+                  "attachments": 0}
+        for path in filepaths:
+            try:
+                _, stats, warnings = import_vwm.import_file(
+                    context, path, options)
+            except (VwmFormatError, import_vwm.VwmImportError) as exc:
+                self.report({"ERROR"}, f"{os.path.basename(path)}: {exc}")
+                continue
+            except Exception as exc:
+                traceback.print_exc()
+                self.report({"ERROR"},
+                            f"{os.path.basename(path)}: unexpected error: "
+                            f"{exc}")
+                continue
+            for warning in warnings:
+                self.report({"WARNING"}, warning)
+            imported += 1
+            for key in totals:
+                totals[key] += stats[key]
+
+        if imported == 0:
+            return {"CANCELLED"}
+        props = (f", {totals['attachments']} of them attached props"
+                 if totals["attachments"] else "")
+        self.report(
+            {"INFO"},
+            f"Imported {imported} file(s): {totals['meshes']} parts"
+            f"{props}, {totals['vertices']} vertices, "
+            f"{totals['triangles']} triangles")
+        return {"FINISHED"}
+
+
+class EXPORT_SCENE_OT_tw_vwm(bpy.types.Operator, ExportHelper):
+    """Export an Empire/Napoleon unit mesh (.variant_weighted_mesh)"""
+    bl_idname = "export_scene.tw_vwm"
+    bl_label = "Export Empire Unit Mesh"
+    bl_options = {"REGISTER"}
+
+    filename_ext = ".variant_weighted_mesh"
+    filter_glob: StringProperty(default="*_weighted_mesh",
+                                options={"HIDDEN"})
+
+    source: EnumProperty(
+        name="Source",
+        items=[("AUTO", "Active Model", "The active model's LOD ladder"),
+               ("SELECTED", "Selected Objects", "Selected meshes only")],
+        default="AUTO")
+    vwm_version: EnumProperty(
+        name="Version", items=VWM_VERSION_ITEMS, default="1")
+    lod_level: IntProperty(
+        name="LOD Level",
+        description="Which level to write. One file is one LOD in this "
+        "format, so a full ladder is four exports (CA names them "
+        "<unit>_lod1 to <unit>_lod4)",
+        default=0, min=0, max=7)
+    apply_modifiers: BoolProperty(
+        name="Apply Modifiers",
+        description="Evaluate modifiers (the armature modifier is always "
+        "disabled first, so the rest pose is what gets written)",
+        default=True)
+    global_scale: FloatProperty(
+        name="Scale", default=1.0, min=0.0001, max=1000.0)
+
+    def invoke(self, context, event):
+        _prefill_version(self, context, "vwm_version", VWM_VERSION_ITEMS)
+        return ExportHelper.invoke(self, context, event)
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = True
+        layout.use_property_decorate = False
+        layout.prop(self, "source")
+        layout.prop(self, "vwm_version")
+        layout.prop(self, "lod_level")
+        layout.prop(self, "apply_modifiers")
+        layout.prop(self, "global_scale")
+
+    def execute(self, context):
+        options = {
+            "source": self.source,
+            "lod_level": self.lod_level,
+            "version": self.vwm_version,
+            "apply_modifiers": self.apply_modifiers,
+            "global_scale": self.global_scale,
+            "auto_lods": False,
+        }
+        try:
+            stats, warnings = export_vwm.export_file(
+                context, self.filepath, options)
+        except (VwmFormatError, export_vwm.VwmExportError) as exc:
+            self.report({"ERROR"}, str(exc))
+            return {"CANCELLED"}
+        except Exception as exc:
+            traceback.print_exc()
+            self.report({"ERROR"}, f"Unexpected error: {exc}")
+            return {"CANCELLED"}
+        for warning in warnings:
+            self.report({"WARNING"}, warning)
+        props = (f" ({stats['attachments']} attached props)"
+                 if stats["attachments"] else "")
+        self.report(
+            {"INFO"},
+            f"Exported {stats['meshes']} parts{props}, "
+            f"{stats['vertices']} vertices, {stats['triangles']} "
+            f"triangles ({stats['bytes']:,} bytes)")
+        return {"FINISHED"}
+
+
+class IMPORT_SCENE_OT_tw_rma(bpy.types.Operator, ImportHelper):
+    """Import an animated rigid model (.rigid_model_animation)"""
+    bl_idname = "import_scene.tw_rma"
+    bl_label = "Import Animated RigidModel"
+    bl_options = {"REGISTER", "UNDO"}
+
+    filename_ext = ".rigid_model_animation"
+    # Blender silently drops filter_glob segments >= 16 characters, so
+    # the full "*.rigid_model_animation" would never match; this shorter
+    # pattern still only matches via the leading wildcard.
+    filter_glob: StringProperty(default="*_animation", options={"HIDDEN"})
+    files: CollectionProperty(type=bpy.types.OperatorFileListElement,
+                              options={"HIDDEN", "SKIP_SAVE"})
+    directory: StringProperty(subtype="DIR_PATH",
+                              options={"HIDDEN", "SKIP_SAVE"})
+
+    build_materials: BoolProperty(
+        name="Build Materials",
+        description="Create Blender materials with image nodes for the "
+        "file's textures",
+        default=True)
+    texture_root: StringProperty(
+        name="Texture Root",
+        description="Folder with extracted game textures (overrides the "
+        "add-on preference)",
+        default="", subtype="DIR_PATH")
+    global_scale: FloatProperty(
+        name="Scale", default=1.0, min=0.0001, max=1000.0)
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = True
+        layout.use_property_decorate = False
+        layout.prop(self, "build_materials")
+        if self.build_materials:
+            layout.prop(self, "texture_root")
+        layout.prop(self, "global_scale")
+
+    def execute(self, context):
+        options = {
+            "build_materials": self.build_materials,
+            "texture_root": self.texture_root or get_texture_root(context),
+            "global_scale": self.global_scale,
+        }
+
+        filepaths = []
+        if self.files:
+            for entry in self.files:
+                if entry.name:
+                    filepaths.append(os.path.join(self.directory, entry.name))
+        if not filepaths and self.filepath:
+            filepaths = [self.filepath]
+
+        imported = 0
+        totals = {"meshes": 0, "vertices": 0, "triangles": 0}
+        for path in filepaths:
+            try:
+                _, stats, warnings = import_rma.import_file(
+                    context, path, options)
+            except (ArmFormatError, AnimFormatError,
+                    import_rma.RmaImportError) as exc:
+                self.report({"ERROR"}, f"{os.path.basename(path)}: {exc}")
+                continue
+            except Exception as exc:
+                traceback.print_exc()
+                self.report({"ERROR"},
+                            f"{os.path.basename(path)}: unexpected error: "
+                            f"{exc}")
+                continue
+            for warning in warnings:
+                self.report({"WARNING"}, warning)
+            imported += 1
+            for key in totals:
+                totals[key] += stats[key]
+
+        if imported == 0:
+            return {"CANCELLED"}
+        self.report(
+            {"INFO"},
+            f"Imported {imported} file(s): {totals['meshes']} objects, "
+            f"{totals['vertices']} vertices, {totals['triangles']} "
+            "triangles")
+        return {"FINISHED"}
+
+
+class EXPORT_SCENE_OT_tw_rma(bpy.types.Operator, ExportHelper):
+    """Export an animated rigid model (.rigid_model_animation)"""
+    bl_idname = "export_scene.tw_rma"
+    bl_label = "Export Animated RigidModel"
+    bl_options = {"REGISTER"}
+
+    filename_ext = ".rigid_model_animation"
+    filter_glob: StringProperty(default="*_animation", options={"HIDDEN"})
+
+    source: EnumProperty(
+        name="Source",
+        items=[("AUTO", "Active Model", "The active model's objects"),
+               ("SELECTED", "Selected Objects", "Selected meshes only")],
+        default="AUTO")
+    apply_modifiers: BoolProperty(
+        name="Apply Modifiers",
+        description="Evaluate modifiers (the armature modifier is always "
+        "disabled first, so the rest pose is what gets written)",
+        default=True)
+    frame_start: IntProperty(name="Frame Start", default=0)
+    frame_end: IntProperty(name="Frame End", default=0)
+    global_scale: FloatProperty(
+        name="Scale", default=1.0, min=0.0001, max=1000.0)
+
+    def invoke(self, context, event):
+        scene = context.scene
+        self.frame_start = scene.frame_start
+        self.frame_end = scene.frame_end
+        return ExportHelper.invoke(self, context, event)
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = True
+        layout.use_property_decorate = False
+        layout.prop(self, "source")
+        layout.prop(self, "apply_modifiers")
+        layout.prop(self, "frame_start")
+        layout.prop(self, "frame_end")
+        layout.prop(self, "global_scale")
+
+    def execute(self, context):
+        options = {
+            "source": self.source,
+            "apply_modifiers": self.apply_modifiers,
+            "frame_start": self.frame_start,
+            "frame_end": self.frame_end,
+            "global_scale": self.global_scale,
+            "auto_lods": False,
+        }
+        try:
+            stats, warnings = export_rma.export_file(
+                context, self.filepath, options)
+        except (ArmFormatError, AnimFormatError,
+                export_rma.RmaExportError) as exc:
+            self.report({"ERROR"}, str(exc))
+            return {"CANCELLED"}
+        except Exception as exc:
+            traceback.print_exc()
+            self.report({"ERROR"}, f"Unexpected error: {exc}")
+            return {"CANCELLED"}
+        for warning in warnings:
+            self.report({"WARNING"}, warning)
+        self.report(
+            {"INFO"},
+            f"Exported {stats['meshes']} objects, {stats['bones']} bones, "
+            f"{stats['frames']} frames ({stats['bytes']:,} bytes)")
+        return {"FINISHED"}
+
+
 def menu_import(self, context):
     self.layout.operator(IMPORT_SCENE_OT_rmv2.bl_idname,
                          text="Total War RigidModel (.rigid_model_v2)")
+    self.layout.operator(IMPORT_SCENE_OT_tw_arm.bl_idname,
+                         text="Total War Shogun 2 RigidModel "
+                              "(.animatable_rigid_model, .rigid_model)")
+    self.layout.operator(IMPORT_SCENE_OT_tw_vmpf.bl_idname,
+                         text="Total War Shogun 2 Unit Part "
+                              "(.variant_part_mesh)")
+    self.layout.operator(IMPORT_SCENE_OT_tw_vwm.bl_idname,
+                         text="Total War Empire Unit Mesh "
+                              "(.variant_weighted_mesh)")
+    self.layout.operator(IMPORT_SCENE_OT_tw_rma.bl_idname,
+                         text="Total War Animated RigidModel "
+                              "(.rigid_model_animation)")
     self.layout.operator(IMPORT_SCENE_OT_tw_anim.bl_idname,
                          text="Total War Animation (.anim)")
 
@@ -457,6 +1174,18 @@ def menu_import(self, context):
 def menu_export(self, context):
     self.layout.operator(EXPORT_SCENE_OT_rmv2.bl_idname,
                          text="Total War RigidModel (.rigid_model_v2)")
+    self.layout.operator(EXPORT_SCENE_OT_tw_arm.bl_idname,
+                         text="Total War Shogun 2 RigidModel "
+                              "(.animatable_rigid_model, .rigid_model)")
+    self.layout.operator(EXPORT_SCENE_OT_tw_vmpf.bl_idname,
+                         text="Total War Shogun 2 Unit Part "
+                              "(.variant_part_mesh)")
+    self.layout.operator(EXPORT_SCENE_OT_tw_vwm.bl_idname,
+                         text="Total War Empire Unit Mesh "
+                              "(.variant_weighted_mesh)")
+    self.layout.operator(EXPORT_SCENE_OT_tw_rma.bl_idname,
+                         text="Total War Animated RigidModel "
+                              "(.rigid_model_animation)")
     self.layout.operator(EXPORT_SCENE_OT_tw_anim.bl_idname,
                          text="Total War Animation (.anim)")
 
@@ -464,6 +1193,14 @@ def menu_export(self, context):
 CLASSES = (
     IMPORT_SCENE_OT_rmv2,
     EXPORT_SCENE_OT_rmv2,
+    IMPORT_SCENE_OT_tw_arm,
+    EXPORT_SCENE_OT_tw_arm,
+    IMPORT_SCENE_OT_tw_vmpf,
+    EXPORT_SCENE_OT_tw_vmpf,
+    IMPORT_SCENE_OT_tw_vwm,
+    EXPORT_SCENE_OT_tw_vwm,
+    IMPORT_SCENE_OT_tw_rma,
+    EXPORT_SCENE_OT_tw_rma,
     IMPORT_SCENE_OT_tw_anim,
     EXPORT_SCENE_OT_tw_anim,
 )

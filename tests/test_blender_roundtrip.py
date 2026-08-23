@@ -895,9 +895,14 @@ def make_animation_anim(frames=4, skeleton_name="humanoid01"):
             base = Quaternion((BIND_R[b][3], *BIND_R[b][:3]))
             q = base @ extra
             rotations[f, b] = (q.x, q.y, q.z, q.w)
-    return af.build_simple(7, skeleton_name, 20.0, ANIM_BONES,
+    anim = af.build_simple(7, skeleton_name, 20.0, ANIM_BONES,
                            translations, rotations,
                            flags=["shake_camera"])
+    # Not 1, so the round trip below actually proves the header word is
+    # carried rather than re-asserted.  38 of Warhammer 3's v7 files
+    # have 2 here.
+    anim.header_type = 2
+    return anim
 
 
 def make_realistic_anim(frames=3):
@@ -1245,6 +1250,9 @@ def anim_animation_case(tmpdir):
           "skeleton name taken from the armature")
     check(abs(out.frame_rate - 20.0) < 1e-4, "frame rate preserved")
     check(out.flags == ["shake_camera"], f"v7 flags preserved ({out.flags})")
+    check(out.header_type == animation.header_type,
+          f"the header type word survives the round trip "
+          f"({out.header_type})")
     check([(b.name, b.parent) for b in out.bones]
           == [(b.name, b.parent) for b in ANIM_BONES],
           "bone table preserved")
@@ -1958,6 +1966,730 @@ def anim_operator_case(tmpdir):
     check(cancelled, "bad .anim cancels cleanly with a format error")
 
 
+# ---------------------------------------------------------------------------
+# Shogun 2
+# ---------------------------------------------------------------------------
+
+def make_shogun2_anim(bones=None, frames=3, events=(), version=1):
+    """A Shogun 2 .anim: every bone dynamic, float32 quaternions."""
+    bones = bones or [af.AnimBone("bone_cannon_base", -1),
+                      af.AnimBone("bone_chassis", 0),
+                      af.AnimBone("bone_barrel", 1)]
+    n = len(bones)
+    translations = np.zeros((frames, n, 3), np.float32)
+    rotations = np.zeros((frames, n, 4), np.float32)
+    rotations[:, :, 3] = 1.0
+    for f in range(frames):
+        for b in range(n):
+            translations[f, b] = (0.0, float(b), 0.25 * f)
+    anim = af.build_simple(version, "", 30.0, bones,
+                           translations, rotations)
+    anim.events = [tuple(e) for e in events]
+    return anim
+
+
+def shogun2_anim_case(tmpdir):
+    """Shogun 2 .anim: builds an armature when there is none and keys the
+    frames onto it when there is, with its events surviving a re-export."""
+    print("\n=== Shogun 2 .anim ===")
+    reset_scene()
+
+    events = [("FIRE_TIME", "0.46"),
+              ("FIRE_POSITION", "0.00", "3.66", "0.24")]
+    path = write_anim(tmpdir, "cannon.anim",
+                      make_shogun2_anim(frames=5, events=events))
+
+    arm_obj, stats, _ = import_anim.import_file(bpy.context, path, {
+        "attach_meshes": False, "global_scale": 1.0})
+    check(stats["created_armature"],
+          "no armature in the scene -> a fresh one is built")
+    check(len(arm_obj.data.bones) == 3, "3 bones imported")
+    check(arm_obj.data.bones[1].parent is not None
+          and arm_obj.data.bones[1].parent.name == "bone_cannon_base",
+          "bone hierarchy imported")
+    check(arm_obj.data.rmv2.anim_version == 1, "version 1 recorded")
+    check(stats["keyed_bones"] > 0,
+          "a moving Shogun 2 file is keyed as an action too - it is both "
+          "the skeleton and the animation")
+    check("FIRE_TIME" in arm_obj.data.rmv2.events_json,
+          "animation events stored on the armature")
+
+    bpy.context.view_layer.objects.active = arm_obj
+    arm_obj.select_set(True)
+
+    out = os.path.join(tmpdir, "cannon_out.anim")
+    export_anim.export_file(bpy.context, out, {
+        "mode": "ANIMATION", "version": "1", "skeleton_name": "",
+        "frame_rate": 0.0, "global_scale": 1.0})
+    result = af.load(open(out, "rb").read())
+    check(result.version == 1, "exported as version 1")
+    check([b.name for b in result.bones]
+          == ["bone_cannon_base", "bone_chassis", "bone_barrel"],
+          "bone table kept on export")
+    check(result.events == [tuple(e) for e in events],
+          "animation events written back out")
+
+    # A second file now applies onto the existing armature. Events belong
+    # to a specific animation, so importing another one replaces them
+    # (the same rule the flags/frame rate already follow).
+    path2 = write_anim(tmpdir, "cannon_fire.anim", make_shogun2_anim(frames=4))
+    _, stats2, _ = import_anim.import_file(bpy.context, path2, {
+        "attach_meshes": False, "global_scale": 1.0})
+    check(not stats2["created_armature"],
+          "with an armature present the file is applied as an animation")
+    check(arm_obj.data.rmv2.events_json == "",
+          "importing an event-less animation clears the stored events")
+
+    # The headerless variant has no version field at all.
+    out0 = os.path.join(tmpdir, "cannon_v0.anim")
+    export_anim.export_file(bpy.context, out0, {
+        "mode": "ANIMATION", "version": "0", "skeleton_name": "",
+        "frame_rate": 0.0, "global_scale": 1.0})
+    raw = open(out0, "rb").read()
+    check(np.frombuffer(raw[:4], "<f4")[0] == 30.0,
+          "headerless variant starts at the frame rate, not a version")
+    check(af.load(raw).version == af.SHOGUN2_NO_HEADER_VERSION,
+          "headerless variant is recognised on re-import")
+
+
+def make_shogun2_rmv2(version=2, bone_index=1):
+    rmv = rf.RmvFile(version=version, skeleton_name="cannon.anim")
+    mat = rf.Shogun2Material.build(
+        version, material_id=21, model_name="chassis_lod1",
+        texture_paths=["rigidmodels/artillery/textures/cannon"],
+        bone_index=bone_index)
+    mat.vertex_format = rf.VF_STATIC
+    lod = rf.RmvLod(camera_distance=100.0, lod_level=0)
+    lod.models.append(rf.RmvModel(material=mat, mesh=make_cube_mesh(0)))
+    rmv.lods.append(lod)
+    return rmv
+
+
+def shogun2_rmv2_case(tmpdir):
+    """Shogun 2 .rigid_model_v2 (v1/v2): the mesh is welded to one bone,
+    so importing with its skeleton must constrain it there, and exporting
+    must write the vertices back in that bone's space."""
+    print("\n=== Shogun 2 .rigid_model_v2 ===")
+    for version in (1, 2):
+        reset_scene()
+        path = os.path.join(tmpdir, f"cannon_v{version}.rigid_model_v2")
+        with open(path, "wb") as handle:
+            handle.write(rf.save(make_shogun2_rmv2(version)))
+
+        anim_path = write_anim(tmpdir, f"cannon_skel_v{version}.anim",
+                               make_shogun2_anim())
+        arm_obj, _, _ = import_anim.import_file(bpy.context, anim_path, {
+            "attach_meshes": False, "global_scale": 1.0})
+        bpy.context.view_layer.objects.active = arm_obj
+        arm_obj.select_set(True)
+
+        root, stats = import_rmv2.import_file(bpy.context, path, {
+            "import_lods": "ALL", "build_materials": False,
+            "attach_armature": True, "global_scale": 1.0})
+        check(root.rmv2.version == str(version),
+              f"v{version} recorded on the root collection")
+        check(root.rmv2.skeleton_name == "cannon.anim",
+              f"v{version}: the .anim the file names is kept")
+        obj = next(o for o in root.all_objects if o.type == "MESH")
+        child_of = next((c for c in obj.constraints
+                         if c.type == "CHILD_OF"), None)
+        check(child_of is not None and child_of.subtarget == "bone_chassis",
+              f"v{version}: mesh constrained to the bone its material names")
+        check(len(obj.vertex_groups) == 0,
+              f"v{version}: no vertex groups - Shogun 2 has no skinning")
+
+        activate_collection(root.name)
+        out = os.path.join(tmpdir, f"cannon_v{version}_out.rigid_model_v2")
+        export_rmv2.export_file(bpy.context, out, {
+            "source": "AUTO", "version": str(version), "skeleton_name": "",
+            "auto_lods": False, "apply_modifiers": True,
+            "high_precision": True, "write_attach_points": False,
+            "global_scale": 1.0})
+        result = rf.load(open(out, "rb").read())
+        model = result.lods[0].models[0]
+        check(result.version == version, f"v{version}: version kept")
+        check(isinstance(model.material, rf.Shogun2Material),
+              f"v{version}: a Shogun 2 material header was written")
+        check(model.material.bone_index == 1,
+              f"v{version}: bone index kept ({model.material.bone_index})")
+        check(model.material.material_id == 21,
+              f"v{version}: material id kept")
+        original = make_shogun2_rmv2(version).lods[0].models[0]
+        dev = max(
+            np.abs(original.mesh.positions.min(0)
+                   - model.mesh.positions.min(0)).max(),
+            np.abs(original.mesh.positions.max(0)
+                   - model.mesh.positions.max(0)).max())
+        check(dev < 5e-3,
+              f"v{version}: geometry stays in the bone's space, not moved "
+              f"by it (max bbox drift {dev:.5f})")
+
+
+def make_arm_file(bone_indices=(1, 2)):
+    from io_scene_rmv2 import arm_format as armf
+    arm = armf.ArmFile()
+    cube = make_cube_mesh(0)
+    tris = cube.indices.reshape(-1, 3)
+    for bone in bone_indices:
+        floats, vec4s = armf.default_params()
+        mesh = armf.ArmMesh(version=5, bone_index=bone,
+                            float_params=floats, vec4_params=vec4s)
+        mesh.textures = ["cannon_diffuse", "cannon_normal",
+                         "cannon_gloss_map", ""]
+        n = len(cube.positions)
+        mesh.positions = cube.positions.copy()
+        mesh.normals = cube.normals.copy()
+        mesh.tangents = cube.tangents.copy()
+        mesh.binormals = cube.binormals.copy()
+        mesh.uv0 = cube.uv0.copy()
+        mesh.uv1 = np.zeros((n, 2), np.float32)
+        mesh.colours = np.ones((n, 4), np.float32)
+        mesh.indices = tris.ravel().astype(np.uint32)
+        arm.meshes.append(mesh)
+    return arm
+
+
+def shogun2_arm_case(tmpdir):
+    """Shogun 2 .animatable_rigid_model: a flat list of objects, each
+    welded to one bone."""
+    print("\n=== Shogun 2 .animatable_rigid_model ===")
+    from io_scene_rmv2 import arm_format as armf
+    from io_scene_rmv2 import export_arm, import_arm
+    reset_scene()
+
+    path = os.path.join(tmpdir, "cannon.animatable_rigid_model")
+    with open(path, "wb") as handle:
+        handle.write(armf.save(make_arm_file()))
+
+    anim_path = write_anim(tmpdir, "arm_skel.anim", make_shogun2_anim())
+    arm_obj, _, _ = import_anim.import_file(bpy.context, anim_path, {
+        "attach_meshes": False, "global_scale": 1.0})
+    bpy.context.view_layer.objects.active = arm_obj
+    arm_obj.select_set(True)
+
+    root, stats, warnings = import_arm.import_file(bpy.context, path, {
+        "build_materials": False, "texture_root": "",
+        "attach_armature": True, "global_scale": 1.0})
+    check(stats["meshes"] == 2, "both objects imported")
+    check(stats["attached"] == 2, "both objects bound to their bone")
+    check(root.rmv2.skeleton_name == "cannon.anim",
+          "root points at the .anim that sits beside the model")
+    objs = [o for o in root.all_objects if o.type == "MESH"]
+    subtargets = sorted(c.subtarget for o in objs for c in o.constraints
+                        if c.type == "CHILD_OF")
+    check(subtargets == ["bone_barrel", "bone_chassis"],
+          f"bound to the named bones ({subtargets})")
+    check(len(objs[0].rmv2.textures) == 3,
+          "the file's three texture slots imported")
+
+    for obj in objs:
+        obj.select_set(True)
+    out = os.path.join(tmpdir, "cannon_out.animatable_rigid_model")
+    estats, warnings = export_arm.export_file(bpy.context, out, {
+        "source": "SELECTED", "arm_version": 5,
+        "apply_modifiers": True, "global_scale": 1.0})
+    check(estats["meshes"] == 2, "both objects exported")
+
+    result = armf.load(open(out, "rb").read())
+    original = make_arm_file()
+    check(sorted(m.bone_index for m in result.meshes) == [1, 2],
+          "bone indices kept")
+    for mo, me in zip(original.meshes, result.meshes):
+        check(len(mo.indices) == len(me.indices),
+              f"bone {mo.bone_index}: triangle count kept")
+        dev = max(np.abs(mo.positions.min(0) - me.positions.min(0)).max(),
+                  np.abs(mo.positions.max(0) - me.positions.max(0)).max())
+        check(dev < 1e-4,
+              f"bone {mo.bone_index}: geometry stays in the bone's space "
+              f"(max bbox drift {dev:.6f})")
+    check(result.meshes[0].get_texture("diffuse") == "cannon_diffuse",
+          "texture names kept")
+    check(len(result.meshes[0].float_params) == 11,
+          "the vanilla material parameter block is written")
+
+
+def make_empire_skeleton(frames=3):
+    """A 3-bone chain in Empire's headerless .anim layout."""
+    anim = make_shogun2_anim(frames=frames)
+    anim.version = af.SHOGUN2_NO_HEADER_VERSION
+    for frame in anim.parts[0].dynamic_frames:
+        frame.extras = np.full((len(anim.bones), 3), 0.001, np.float32)
+    return anim
+
+
+def make_vwm_part(name, positions_g, normals_g, uv, tris, frames,
+                  influences):
+    """A part whose stored, per-bone-space copies skin back to
+    `positions_g`.
+
+    That is the whole point of the format and the only thing worth
+    asserting about it: build the file from the answer, then check the
+    importer recovers the answer.
+    """
+    from io_scene_rmv2 import vwm_format as wfmt
+
+    part = wfmt.VwmPart(name=name)
+    part.uv = np.asarray(uv, np.float32)
+    part.tangents = np.tile(np.array([1.0, 0.0, 0.0], np.float32),
+                            (len(positions_g), 1))
+    part.binormals = np.tile(np.array([0.0, 1.0, 0.0], np.float32),
+                             (len(positions_g), 1))
+    part.indices = np.asarray(tris, np.uint32).ravel()
+
+    counts, bones, positions, normals, weights = [], [], [], [], []
+    for i in range(len(positions_g)):
+        counts.append(len(influences))
+        for bone, weight in influences:
+            matrix = frames[bone]
+            rot = np.asarray(matrix, np.float32)[:3, :3]
+            offset = np.asarray(matrix, np.float32)[:3, 3]
+            bones.append(bone)
+            positions.append((positions_g[i] - offset) @ rot)
+            normals.append(normals_g[i] @ rot)
+            weights.append(weight)
+
+    for key, value in wfmt.build_influences(
+            counts, bones, positions, normals, weights).items():
+        setattr(part, key, value)
+    return part
+
+
+def _import_empire_skeleton(tmpdir, name="tpose.anim"):
+    path = write_anim(tmpdir, name, make_empire_skeleton())
+    arm_obj, _, _ = import_anim.import_file(bpy.context, path, {
+        "attach_meshes": False, "global_scale": 1.0, "mode": "SKELETON"})
+    bpy.context.view_layer.objects.active = arm_obj
+    arm_obj.select_set(True)
+    return arm_obj
+
+
+def vwm_case(tmpdir):
+    """Empire .variant_weighted_mesh: no model-space positions at all, so
+    the importer has to skin the file against the armature to place a
+    single vertex."""
+    print("\n=== Empire .variant_weighted_mesh ===")
+    from io_scene_rmv2 import vwm_format as wfmt
+    from io_scene_rmv2 import export_vwm, import_vwm
+    reset_scene()
+
+    arm_obj = _import_empire_skeleton(tmpdir)
+    frames = rmv2_skeleton.bind_frames_in_game_space(arm_obj, 1.0)
+    check(len(frames) == 3, "3 bind frames from the skeleton")
+
+    cube = make_cube_mesh(0)
+    tris = cube.indices.reshape(-1, 3)
+    model = wfmt.VwmFile(version=1)
+    model.float_params = [("light_scale", 1.0)]
+    # One rigid part and one that is split evenly between two bones, so
+    # both the single- and multi-influence paths are exercised.
+    model.parts = [
+        make_vwm_part("unit_head01", cube.positions, cube.normals,
+                      cube.uv0, tris, frames, [(2, 1.0)]),
+        make_vwm_part("unit_body01", cube.positions + 0.1, cube.normals,
+                      cube.uv0, tris, frames, [(0, 0.5), (1, 0.5)]),
+    ]
+
+    path = os.path.join(tmpdir, "grenadiers_lod1.variant_weighted_mesh")
+    with open(path, "wb") as handle:
+        handle.write(wfmt.save(model))
+
+    root, stats, warnings = import_vwm.import_file(bpy.context, path, {
+        "build_materials": False, "texture_root": "", "global_scale": 1.0})
+    check(stats["meshes"] == 2, "both parts imported")
+    check(root.name == "grenadiers",
+          f"the _lod1 suffix names the root 'grenadiers' (got {root.name})")
+    lods = [c for c in root.children if c.rmv2.is_lod]
+    check(len(lods) == 1 and lods[0].rmv2.lod_level == 0,
+          "CA's lod1 becomes Blender's LOD 0")
+
+    objs = {o.name: o for o in root.all_objects if o.type == "MESH"}
+    check(sorted(objs) == ["unit_body01", "unit_head01"],
+          f"parts keep their names ({sorted(objs)})")
+
+    # The rigid part must land exactly where its game-space positions say.
+    head = objs["unit_head01"]
+    got = np.array([v.co for v in head.data.vertices], np.float32)
+    want = utils.game_to_blender(cube.positions)
+    dev = float(np.abs(np.sort(got, axis=0) - np.sort(want, axis=0)).max())
+    check(dev < 1e-5,
+          f"single-influence vertices skin back to their model-space "
+          f"positions (max drift {dev:.7f})")
+
+    body = objs["unit_body01"]
+    got = np.array([v.co for v in body.data.vertices], np.float32)
+    want = utils.game_to_blender(cube.positions + 0.1)
+    dev = float(np.abs(np.sort(got, axis=0) - np.sort(want, axis=0)).max())
+    check(dev < 1e-5,
+          f"two-influence vertices blend back to one point "
+          f"(max drift {dev:.7f})")
+
+    groups = sorted(g.name for g in body.vertex_groups)
+    check(groups == ["bone_cannon_base", "bone_chassis"],
+          f"vertex groups are named after the bones ({groups})")
+    check(any(m.type == "ARMATURE" and m.object is arm_obj
+              for m in body.modifiers),
+          "parts are bound to the armature with an armature modifier")
+    check(len(head.vertex_groups) == 1,
+          "a single-influence part gets exactly one group")
+
+    # A second LOD file must land in the same root, not a new one.
+    path2 = os.path.join(tmpdir, "grenadiers_lod2.variant_weighted_mesh")
+    with open(path2, "wb") as handle:
+        handle.write(wfmt.save(model))
+    root2, _, _ = import_vwm.import_file(bpy.context, path2, {
+        "build_materials": False, "texture_root": "", "global_scale": 1.0})
+    check(root2 is root, "a unit's LODs share one root collection")
+    levels = sorted(c.rmv2.lod_level for c in root.children if c.rmv2.is_lod)
+    check(levels == [0, 1], f"the ladder fills in ({levels})")
+
+    # Export the finest level back out.
+    for obj in root.all_objects:
+        obj.select_set(obj.type == "MESH"
+                       and obj.name in ("unit_head01", "unit_body01"))
+    out = os.path.join(tmpdir, "grenadiers_out.variant_weighted_mesh")
+    estats, warnings = export_vwm.export_file(bpy.context, out, {
+        "source": "SELECTED", "lod_level": 0, "apply_modifiers": True,
+        "global_scale": 1.0, "auto_lods": False})
+    check(estats["meshes"] == 2, "both parts exported")
+
+    result = wfmt.load(open(out, "rb").read())
+    check(result.version == 1, "written as version 1")
+    check(sorted(p.name for p in result.parts)
+          == ["unit_body01", "unit_head01"],
+          "part names survive the round trip")
+    by_name = {p.name: p for p in result.parts}
+
+    # Re-skinning the exported file must reproduce the same model.
+    for part_name, expected in (("unit_head01", cube.positions),
+                                ("unit_body01", cube.positions + 0.1)):
+        part = by_name[part_name]
+        positions, _, placed = wfmt.skin(part, frames)
+        check(placed.all(), f"{part_name}: every bone was resolvable")
+        dev = float(np.abs(np.sort(positions, axis=0)
+                           - np.sort(expected.astype(np.float32),
+                                     axis=0)).max())
+        check(dev < 1e-4,
+              f"{part_name}: re-skins to the original geometry "
+              f"(max drift {dev:.6f})")
+        check(np.allclose(
+            np.add.reduceat(part.influence_weights,
+                            np.concatenate(([0], np.cumsum(
+                                part.influence_counts)[:-1]))), 1.0,
+            atol=1e-5),
+            f"{part_name}: every vertex's weights sum to 1")
+
+    check(int(by_name["unit_head01"].influence_counts.max()) == 1,
+          "the rigid part stays single-influence")
+    check(int(by_name["unit_body01"].influence_counts.max()) == 2,
+          "the split part keeps both influences")
+
+
+def every_version_case(tmpdir):
+    """Every version this add-on reads, it can also write - and the one
+    a model was imported as is the one the exporter offers back."""
+    print("\n=== exporting every version ===")
+    from io_scene_rmv2 import export_anim, export_arm, export_rmv2
+    from io_scene_rmv2 import import_anim, import_arm, import_rmv2
+    from io_scene_rmv2 import arm_format as armf
+    reset_scene()
+
+    # ---- .anim: v8 is the new one, and the default for a fresh scene --
+    path = write_anim(tmpdir, "v8_source.anim", make_animation_anim())
+    arm_obj, _, _ = import_anim.import_file(bpy.context, path, {
+        "mode": "SKELETON", "global_scale": 1.0})
+    bpy.context.view_layer.objects.active = arm_obj
+    arm_obj.select_set(True)
+
+    for version in ("5", "6", "7", "8"):
+        out = os.path.join(tmpdir, "anim_v%s.anim" % version)
+        stats, warnings = export_anim.export_file(bpy.context, out, {
+            "mode": "ANIMATION", "version": version, "skeleton_name": "",
+            "frame_rate": 0.0, "global_scale": 1.0})
+        written = af.load(open(out, "rb").read())
+        check(written.version == int(version),
+              "anim exported as version %s (%d bones)"
+              % (version, len(written.bones)))
+        if version == "8":
+            part = written.parts[0]
+            check(part.translation_rates is not None
+                  and all(int(r) in (0, 12, -12)
+                          for r in part.translation_rates),
+                  "a fresh v8 export uses the uncompressed rates")
+            res = af.resolve_all(written)
+            check(res.translations.shape[1] == len(written.bones),
+                  "and resolves to one track per bone")
+
+    # ---- the version an armature was imported as is remembered --------
+    v8_path = os.path.join(tmpdir, "anim_v8.anim")
+    reset_scene()
+    arm_obj, _, _ = import_anim.import_file(bpy.context, v8_path, {
+        "mode": "SKELETON", "global_scale": 1.0})
+    check(arm_obj.data.rmv2.anim_version == 8,
+          "the armature records the version it was imported from (got %d)"
+          % arm_obj.data.rmv2.anim_version)
+
+    # ---- .rigid_model_v2 v5, which used to be import-only -------------
+    reset_scene()
+    rmv2_path = os.path.join(tmpdir, "v5.rigid_model_v2")
+    model = make_file(6, rf.VF_STATIC, with_attach_points=False)
+    with open(rmv2_path, "wb") as handle:
+        handle.write(rf.save(model))
+    result = import_rmv2.import_file(bpy.context, rmv2_path, {
+        "build_materials": False, "global_scale": 1.0, "lods": "ALL"})
+    root = result[0]
+    check(root.rmv2.version == "6",
+          "the collection records the version it came from (%s)"
+          % root.rmv2.version)
+    for obj in root.all_objects:
+        obj.select_set(obj.type == "MESH")
+    for version in ("5", "6", "7", "8"):
+        out = os.path.join(tmpdir, "mesh_v%s.rigid_model_v2" % version)
+        estats, warnings = export_rmv2.export_file(bpy.context, out, {
+            "source": "AUTO", "version": version, "skeleton_name": "",
+            "auto_lods": False, "apply_modifiers": True,
+            "global_scale": 1.0, "high_precision": True,
+            "write_attach_points": True})
+        written = rf.load(open(out, "rb").read())
+        check(written.version == int(version),
+              "rigid_model_v2 exported as version %s (%d lods)"
+              % (version, len(written.lods)))
+
+    # ---- .animatable_rigid_model, every object version ----------------
+    reset_scene()
+    arm_path = os.path.join(tmpdir, "objects.animatable_rigid_model")
+    with open(arm_path, "wb") as handle:
+        handle.write(armf.save(make_arm_file(bone_indices=(1,))))
+    root, stats, _ = import_arm.import_file(bpy.context, arm_path, {
+        "build_materials": False, "texture_root": "",
+        "attach_armature": False, "global_scale": 1.0})
+    check(root.rmv2.arm_version == 5,
+          "the collection records the object version (%d)"
+          % root.rmv2.arm_version)
+    objs = [o for o in root.all_objects if o.type == "MESH"]
+    for obj in objs:
+        obj.select_set(True)
+    bpy.context.view_layer.objects.active = objs[0]
+    for version in ("0", "1", "2", "3", "4", "5"):
+        out = os.path.join(tmpdir, "objects_v%s.animatable_rigid_model"
+                           % version)
+        estats, warnings = export_arm.export_file(bpy.context, out, {
+            "source": "SELECTED", "arm_version": int(version),
+            "apply_modifiers": True, "global_scale": 1.0})
+        written = armf.load(open(out, "rb").read())
+        check(all(m.version == int(version) for m in written.meshes),
+              "animatable_rigid_model exported as object version %s"
+              % version)
+
+
+def vwm_attachment_case(tmpdir):
+    """The props a unit hangs off a single bone: rigid objects in the
+    file's second section, which used to read as four bytes of padding.
+    Empire's euro_equipment is 134 of them and no skinned parts at all,
+    so that shape has to import too."""
+    print("\n=== .variant_weighted_mesh attachments ===")
+    from io_scene_rmv2 import vwm_format as wfmt
+    from io_scene_rmv2 import export_vwm, import_vwm
+    reset_scene()
+
+    arm_obj = _import_empire_skeleton(tmpdir)
+    frames = rmv2_skeleton.bind_frames_in_game_space(arm_obj, 1.0)
+    cube = make_cube_mesh(0)
+    tris = cube.indices.reshape(-1, 3)
+
+    model = wfmt.VwmFile(version=1)
+    model.float_params = [("light_scale", 1.0)]
+    model.parts = [make_vwm_part("unit_body01", cube.positions,
+                                 cube.normals, cube.uv0, tris, frames,
+                                 [(0, 1.0)])]
+    musket = make_arm_file(bone_indices=(0,)).meshes[0]
+    musket.bone_index = None
+    model.attachments = [wfmt.VwmAttachment(
+        name="rigid_equip_euro_musket01", bone=2, mesh=musket)]
+
+    path = os.path.join(tmpdir, "linemen_lod1.variant_weighted_mesh")
+    with open(path, "wb") as handle:
+        handle.write(wfmt.save(model))
+
+    root, stats, warnings = import_vwm.import_file(bpy.context, path, {
+        "build_materials": False, "texture_root": "", "global_scale": 1.0})
+    for w in warnings[:4]:
+        print("     warning:", w)
+    check(stats["attachments"] == 1, "the attachment was imported")
+    check(stats["meshes"] == 2, "and counted alongside the skinned part")
+
+    objs = {o.name: o for o in root.all_objects if o.type == "MESH"}
+    check("rigid_equip_euro_musket01" in objs,
+          f"the prop keeps its name ({sorted(objs)})")
+    prop = objs["rigid_equip_euro_musket01"]
+    check(not prop.vertex_groups,
+          "a prop is rigid - no vertex groups, unlike a skinned part")
+    child_of = [c for c in prop.constraints if c.type == "CHILD_OF"]
+    check(len(child_of) == 1 and child_of[0].subtarget == "bone_barrel",
+          "it is bound to the bone it rides with a Child Of constraint")
+    check(prop.rmv2.matrix_index == -1,
+          "and the stored index is cleared, since the constraint is now "
+          "the live answer (same rule as every other importer here)")
+
+    got = np.array([v.co for v in prop.data.vertices], np.float32)
+    want = utils.game_to_blender(musket.positions)
+    dev = float(np.abs(np.sort(got, axis=0) - np.sort(want, axis=0)).max())
+    check(dev < 1e-5, f"its geometry lands unskinned (max drift {dev:.7f})")
+
+    # Back out again: the prop must return to the attachment section, not
+    # become a part with no influences.
+    for obj in root.all_objects:
+        obj.select_set(obj.type == "MESH")
+    out = os.path.join(tmpdir, "linemen_out.variant_weighted_mesh")
+    estats, warnings = export_vwm.export_file(bpy.context, out, {
+        "source": "SELECTED", "lod_level": 0, "apply_modifiers": True,
+        "global_scale": 1.0, "auto_lods": False})
+    for w in warnings[:4]:
+        print("     warning:", w)
+    check(estats["attachments"] == 1, "the prop is exported as an attachment")
+
+    result = wfmt.load(open(out, "rb").read())
+    check(len(result.parts) == 1 and len(result.attachments) == 1,
+          f"one skinned part, one prop (got {len(result.parts)} and "
+          f"{len(result.attachments)})")
+    entry = result.attachments[0]
+    check(entry.name == "rigid_equip_euro_musket01",
+          f"the prop's name survives ({entry.name})")
+    check(entry.bone == 2, f"and its bone ({entry.bone})")
+    check(entry.mesh.version == 5, "written as an object version 5")
+    dev = float(np.abs(np.sort(entry.mesh.positions, axis=0)
+                       - np.sort(musket.positions, axis=0)).max())
+    check(dev < 1e-4, f"geometry round-trips (max drift {dev:.6f})")
+
+    # And the shape Empire's equipment file has: props alone.
+    reset_scene()
+    arm_obj = _import_empire_skeleton(tmpdir)
+    only = wfmt.VwmFile(version=1)
+    only.attachments = [wfmt.VwmAttachment(
+        name="rigid_equip_euro_spear01", bone=1, mesh=musket)]
+    equip = os.path.join(tmpdir, "euro_equipment.variant_weighted_mesh")
+    with open(equip, "wb") as handle:
+        handle.write(wfmt.save(only))
+    root, stats, _ = import_vwm.import_file(bpy.context, equip, {
+        "build_materials": False, "texture_root": "", "global_scale": 1.0})
+    check(stats["meshes"] == 1 and stats["attachments"] == 1,
+          "a file of nothing but props imports")
+
+
+def vwm_requires_skeleton_case(tmpdir):
+    """Without a bind pose there is nowhere to put the vertices, so the
+    importer must refuse rather than pile everything on the origin."""
+    print("\n=== .variant_weighted_mesh without a skeleton ===")
+    from io_scene_rmv2 import vwm_format as wfmt
+    from io_scene_rmv2 import import_vwm
+    reset_scene()
+
+    frames = {0: np.eye(4, dtype=np.float32)}
+    cube = make_cube_mesh(0)
+    model = wfmt.VwmFile(version=1)
+    model.parts = [make_vwm_part("unit_head01", cube.positions,
+                                 cube.normals, cube.uv0,
+                                 cube.indices.reshape(-1, 3), frames,
+                                 [(0, 1.0)])]
+    path = os.path.join(tmpdir, "lonely_lod1.variant_weighted_mesh")
+    with open(path, "wb") as handle:
+        handle.write(wfmt.save(model))
+
+    try:
+        import_vwm.import_file(bpy.context, path, {
+            "build_materials": False, "texture_root": "",
+            "global_scale": 1.0})
+        check(False, "importing without an armature is refused")
+    except import_vwm.VwmImportError as exc:
+        check(import_vwm.REFERENCE_SKELETON in str(exc),
+              "the error names the reference skeleton to import first")
+
+
+def rma_case(tmpdir):
+    """.rigid_model_animation: the .animatable_rigid_model object list
+    followed by a whole headerless .anim, so one file carries both the
+    props and the skeleton that moves them."""
+    print("\n=== .rigid_model_animation ===")
+    from io_scene_rmv2 import arm_format as armf
+    from io_scene_rmv2 import export_rma, import_rma
+    reset_scene()
+
+    arm = make_arm_file(bone_indices=(1, 2))
+    anim = make_empire_skeleton(frames=4)
+    blob = armf.save(arm) + af.save(anim)
+    path = os.path.join(tmpdir, "carronade_destruction.rigid_model_animation")
+    with open(path, "wb") as handle:
+        handle.write(blob)
+
+    root, stats, warnings = import_rma.import_file(bpy.context, path, {
+        "build_materials": False, "texture_root": "", "global_scale": 1.0})
+    check(stats["meshes"] == 2, "both objects imported")
+    check(stats["bones"] == 3, "the embedded skeleton was read (3 bones)")
+    check(stats["frames"] > 0, "the embedded animation was keyed on")
+    check(stats["attached"] == 2,
+          "objects are welded to the file's own bones")
+
+    arms = [o for o in root.all_objects if o.type == "ARMATURE"]
+    check(len(arms) == 1,
+          "the armature is built from the file, not the selection")
+    subtargets = sorted(c.subtarget for o in root.all_objects
+                        for c in o.constraints if c.type == "CHILD_OF")
+    check(subtargets == ["bone_barrel", "bone_chassis"],
+          f"welded to the named bones ({subtargets})")
+
+    action = arms[0].animation_data and arms[0].animation_data.action
+    check(action is not None, "the animation arrived as an action")
+
+    # Export it again and check both halves came back.
+    bpy.context.view_layer.objects.active = arms[0]
+    for obj in root.all_objects:
+        obj.select_set(True)
+    out = os.path.join(tmpdir, "carronade_out.rigid_model_animation")
+    estats, warnings = export_rma.export_file(bpy.context, out, {
+        "source": "SELECTED", "apply_modifiers": True,
+        "frame_start": 0, "frame_end": 3, "global_scale": 1.0,
+        "auto_lods": False, "arm_version": 5})
+    check(estats["meshes"] == 2, "both objects exported")
+    check(estats["bones"] == 3, "the skeleton went back in")
+
+    result = armf.load(open(out, "rb").read(), allow_trailing=True)
+    check(len(result.meshes) == 2, "objects re-read")
+    check(sorted(m.bone_index for m in result.meshes) == [1, 2],
+          "bone indices kept")
+    check(len(result.trailing) > 0, "an animation was appended")
+    out_anim = af.load(result.trailing)
+    check(out_anim.version == af.SHOGUN2_NO_HEADER_VERSION,
+          "the embedded .anim uses the headerless layout")
+    check(len(out_anim.bones) == 3, "3 bones written back")
+
+    original = make_arm_file(bone_indices=(1, 2))
+    for mo, me in zip(original.meshes, result.meshes):
+        dev = max(np.abs(mo.positions.min(0) - me.positions.min(0)).max(),
+                  np.abs(mo.positions.max(0) - me.positions.max(0)).max())
+        check(dev < 1e-4,
+              f"bone {mo.bone_index}: geometry stays put "
+              f"(max bbox drift {dev:.6f})")
+
+
+def rma_plain_file_case(tmpdir):
+    """A .rigid_model_animation with nothing after its objects is just a
+    rigid model; say so rather than failing."""
+    print("\n=== .rigid_model_animation with no animation ===")
+    from io_scene_rmv2 import arm_format as armf
+    from io_scene_rmv2 import import_rma
+    reset_scene()
+
+    path = os.path.join(tmpdir, "static.rigid_model_animation")
+    with open(path, "wb") as handle:
+        handle.write(armf.save(make_arm_file(bone_indices=(1,))))
+
+    root, stats, warnings = import_rma.import_file(bpy.context, path, {
+        "build_materials": False, "texture_root": "", "global_scale": 1.0})
+    check(stats["meshes"] == 1, "the objects still import")
+    check(stats["bones"] == 0, "no skeleton was claimed")
+    check(any("no animation" in w for w in warnings),
+          "the user is told the animation is missing")
+
+
 def main():
     print(f"Blender {bpy.app.version_string}")
     io_scene_rmv2.register()
@@ -1992,6 +2724,15 @@ def main():
         lod_overrides_autofill_case()
         batch_export_case(tmpdir)
         anim_operator_case(tmpdir)
+        shogun2_anim_case(tmpdir)
+        shogun2_rmv2_case(tmpdir)
+        shogun2_arm_case(tmpdir)
+        vwm_case(tmpdir)
+        every_version_case(tmpdir)
+        vwm_attachment_case(tmpdir)
+        vwm_requires_skeleton_case(tmpdir)
+        rma_case(tmpdir)
+        rma_plain_file_case(tmpdir)
     except Exception:
         traceback.print_exc()
         FAILURES.append("unhandled exception (see traceback)")
