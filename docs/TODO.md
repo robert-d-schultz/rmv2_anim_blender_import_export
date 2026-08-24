@@ -58,7 +58,7 @@ version 1.11.0 has gone:
     0fc2290  the merge item brought up to date
     8400791  Warhammer - the sway vertex and the banner material (1.17.0)
     bcf992f  that commit named in this list
-    <this>   the tree billboard, and Warhammer 3 complete      (1.18.0)
+    1bb529f  the tree billboard, and Warhammer 3 complete   (1.18.0)
 
 Nothing on the branch is experimental - every commit ships with corpus
 sweeps and tests - but merging is your call, not this add-on's, and it
