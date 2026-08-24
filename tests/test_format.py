@@ -421,12 +421,51 @@ class TestRmv2Version3(unittest.TestCase):
         self.assertEqual(mat.model_name, "hull")
 
 
+LAYOUT_VERTICES = 6
+
+
+def make_layout_block(vertex_format, count=LAYOUT_VERTICES):
+    """A plausible vertex block for one of the Rome 2-era layouts:
+    positions inside a small box, unit-length tangent frames, uvs in
+    [0,1], and whatever extra channels the layout carries."""
+    rng = np.random.default_rng(7)
+    dt = rf._vertex_dtype(vertex_format, 6)
+    raw = np.zeros(count, dt)
+
+    def unit():
+        v = rng.normal(size=(count, 3))
+        return v / np.linalg.norm(v, axis=1)[:, None]
+
+    raw["pos"][:, :3] = rng.uniform(-4.0, 4.0, (count, 3))
+    raw["pos"][:, 3] = 1.0
+    for name in ("normal", "tangent", "binormal"):
+        if name not in dt.names:
+            continue
+        if dt[name].subdtype[0] == np.dtype("u1"):
+            raw[name] = rf._encode_byte_vec(unit())
+        else:
+            raw[name][:, :3] = unit()
+    if "uv" in dt.names:
+        raw["uv"] = rng.uniform(0.0, 1.0, (count, 2))
+    if "pivot" in dt.names:
+        raw["pivot"][:, :3] = rng.uniform(-1.0, 1.0, (count, 3))
+        raw["pivot"][:, 3] = 1.0
+    if "wind" in dt.names:
+        raw["wind"] = rng.uniform(0.0, 2.0, (count, 8))
+    if "unknown" in dt.names:
+        raw["unknown"] = rng.uniform(0.0, 1.0, (count, 4))
+    return raw.tobytes()
+
+
 class TestRome2VertexLayouts(unittest.TestCase):
-    """The four layouts Rome 2's vegetation and water use.  All are
-    import-only: three carry per-vertex fields RmvMeshData cannot hold."""
+    """The layouts Rome 2 added for vegetation, grass, water and terrain
+    tiles.  The two channels a vegetation vertex carries beyond the usual
+    ones live in RmvMeshData.extras, which is what lets these be written
+    and not only read."""
 
     LAYOUTS = {rf.VF_VEGETATION: 60, rf.VF_TREE_BILLBOARD: 28,
-               rf.VF_GRASS: 28, rf.VF_POSITION_UV: 12}
+               rf.VF_GRASS: 28, rf.VF_POSITION_UV: 12,
+               rf.VF_POSITION_HALF: 8}
 
     def test_strides(self):
         for fmt, stride in self.LAYOUTS.items():
@@ -464,12 +503,107 @@ class TestRome2VertexLayouts(unittest.TestCase):
         # unmodified, it goes back out as the bytes it came in as
         self.assertEqual(rf.encode_vertices(mesh, rf.VF_VEGETATION, 6), blob)
 
-    def test_writing_from_scratch_is_refused(self):
+    def test_they_write_as_well_as_read(self):
+        """A mesh with no extras at all still encodes - the channels it
+        does not have are written as zeros, which is what a vegetation
+        mesh built in Blender from scratch would want."""
         mesh = make_cube_mesh(0)
-        for fmt in (rf.VF_VEGETATION, rf.VF_TREE_BILLBOARD, rf.VF_GRASS):
+        for fmt, stride in self.LAYOUTS.items():
             with self.subTest(fmt=rf.VERTEX_FORMAT_NAMES[fmt]):
-                with self.assertRaises(rf.RmvFormatError):
-                    rf.encode_vertices(mesh, fmt, 6)
+                blob = rf.encode_vertices(mesh, fmt, 6)
+                self.assertEqual(len(blob), stride * mesh.vertex_count)
+
+    def test_a_decoded_block_re_encodes_exactly(self):
+        """Decode then encode has to be the identity, or a mesh that has
+        been through Blender comes back changed for no reason."""
+        for fmt, stride in self.LAYOUTS.items():
+            with self.subTest(fmt=rf.VERTEX_FORMAT_NAMES[fmt]):
+                blob = make_layout_block(fmt)
+                mesh = rf.decode_vertices(blob, 0, LAYOUT_VERTICES, stride,
+                                          fmt, 6)
+                mesh.raw_block = None       # no passthrough: really encode
+                self.assertEqual(rf.encode_vertices(mesh, fmt, 6), blob)
+
+    def test_the_extra_channels_survive(self):
+        blob = make_layout_block(rf.VF_VEGETATION)
+        mesh = rf.decode_vertices(blob, 0, LAYOUT_VERTICES, 60,
+                                  rf.VF_VEGETATION, 6)
+        self.assertEqual(sorted(mesh.extras), ["pivot", "wind"])
+        self.assertEqual(mesh.extras["pivot"].shape, (LAYOUT_VERTICES, 4))
+        self.assertEqual(mesh.extras["wind"].shape, (LAYOUT_VERTICES, 8))
+        self.assertEqual(rf.extra_channels(rf.VF_VEGETATION),
+                         {"pivot": 4, "wind": 8})
+        self.assertEqual(rf.extra_channels(rf.VF_STATIC), {})
+
+    def test_a_mesh_that_lost_its_extras_still_writes(self):
+        """Zeros, not a crash - and the geometry is unaffected."""
+        blob = make_layout_block(rf.VF_VEGETATION)
+        mesh = rf.decode_vertices(blob, 0, LAYOUT_VERTICES, 60,
+                                  rf.VF_VEGETATION, 6)
+        mesh.raw_block = None
+        mesh.extras = {}
+        out = rf.encode_vertices(mesh, rf.VF_VEGETATION, 6)
+        again = rf.decode_vertices(out, 0, LAYOUT_VERTICES, 60,
+                                   rf.VF_VEGETATION, 6)
+        np.testing.assert_allclose(again.positions, mesh.positions)
+        self.assertFalse(again.extras["pivot"].any())
+        self.assertFalse(again.extras["wind"].any())
+
+
+class TestEveryLayoutWrites(unittest.TestCase):
+    """Every vertex layout this module reads, it can also write.  The
+    channels that have no standard field - a bow wave's second position,
+    custom terrain's spare colour channels, a vegetation vertex's wind
+    weights - travel in RmvMeshData.extras."""
+
+    READABLE = (rf.VF_STATIC, rf.VF_COLLISION, rf.VF_POSITION16,
+                rf.VF_CUSTOM_TERRAIN, rf.VF_CUSTOM_TERRAIN2,
+                rf.VF_POSITION_UV, rf.VF_S2_STATIC_NO_UV2,
+                rf.VF_S2_STATIC_FLOAT, rf.VF_S2_BOW_WAVE,
+                rf.VF_VEGETATION, rf.VF_TREE_BILLBOARD, rf.VF_GRASS,
+                rf.VF_POSITION_HALF)
+
+    def test_all_of_them(self):
+        mesh = make_cube_mesh(0)
+        for fmt in self.READABLE:
+            with self.subTest(fmt=rf.VERTEX_FORMAT_NAMES[fmt]):
+                blob = rf.encode_vertices(mesh, fmt, 6)
+                self.assertEqual(
+                    len(blob), rf.vertex_stride(fmt, 6) * mesh.vertex_count)
+
+    def test_bow_wave_second_position_survives(self):
+        dt = rf._vertex_dtype(rf.VF_S2_BOW_WAVE, 2)
+        raw = np.zeros(3, dt)
+        raw["pos"][:, :3] = [[1.0, 2.0, 3.0]] * 3
+        raw["pos"][:, 3] = 1.0
+        raw["pos2"][:, :3] = [[4.0, 5.0, 6.0]] * 3
+        raw["pos2"][:, 3] = 1.0
+        raw["uv"] = 0.5
+        raw["unknown"] = 0.25
+        blob = raw.tobytes()
+        mesh = rf.decode_vertices(blob, 0, 3, dt.itemsize,
+                                  rf.VF_S2_BOW_WAVE, 2)
+        np.testing.assert_allclose(mesh.extras["pos2"][:, :3],
+                                   [[4.0, 5.0, 6.0]] * 3)
+        mesh.raw_block = None
+        self.assertEqual(rf.encode_vertices(mesh, rf.VF_S2_BOW_WAVE, 2),
+                         blob)
+
+    def test_custom_terrain_spare_colours_survive(self):
+        dt = rf._vertex_dtype(rf.VF_CUSTOM_TERRAIN2, 6)
+        raw = np.zeros(2, dt)
+        raw["pos"][:, 3] = 1.0
+        raw["normal"][:, 3] = 1.0
+        raw["col0"] = 10
+        raw["col1"] = 20
+        raw["col2"] = 30
+        blob = raw.tobytes()
+        mesh = rf.decode_vertices(blob, 0, 2, dt.itemsize,
+                                  rf.VF_CUSTOM_TERRAIN2, 6)
+        self.assertTrue((mesh.extras["col1"] == 20).all())
+        mesh.raw_block = None
+        self.assertEqual(rf.encode_vertices(mesh, rf.VF_CUSTOM_TERRAIN2, 6),
+                         blob)
 
 
 class TestFixedFieldJunk(unittest.TestCase):

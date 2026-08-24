@@ -187,6 +187,111 @@ def layer_collection_hidden(collection_name):
 # Tests
 # ---------------------------------------------------------------------------
 
+def vegetation_case(tmpdir):
+    """A tree and a decal through Blender and back.
+
+    Both were import-only until recently, for two different reasons: a
+    vegetation vertex carries a rest position and eight wind weights that
+    no standard mesh field holds, and a decal's material is a texture
+    path with a few floats rather than the weighted layout. The first now
+    rides on point attributes, the second in the object's extra data.
+    """
+    print("\n=== Vegetation and decal materials ===")
+    reset_scene()
+    src_path = os.path.join(tmpdir, "src_vegetation.rigid_model_v2")
+    dst_path = os.path.join(tmpdir, "dst_vegetation.rigid_model_v2")
+
+    rmv = rf.RmvFile(version=6, skeleton_name="")
+    lod = rf.RmvLod(camera_distance=100.0, lod_level=0)
+
+    tree = make_cube_mesh(0)
+    tree.extras["pivot"] = np.tile(
+        np.array([0.25, 0.5, -0.125, 1.0], np.float32), (8, 1))
+    tree.extras["wind"] = np.tile(
+        np.array([0.0, 1.0, 2.0, 0.0, 1.0, 1.0, 1.0, 0.5], np.float32),
+        (8, 1))
+    tree_mat = rf.WeightedMaterial(material_id=74,
+                                   vertex_format=rf.VF_VEGETATION,
+                                   model_name="tree_mesh")
+    tree_mat.textures = [(0, "battleterrain/vegetation/bark.dds")]
+    lod.models.append(rf.RmvModel(material=tree_mat, mesh=tree))
+
+    decal = make_cube_mesh(0)
+    decal_mat = rf.DecalMaterial(
+        material_id=87, vertex_format=rf.VF_POSITION16,
+        texture_path="rigidmodels/decals/mud_01",
+        values=(0.0, 0.0, 0.0, 2.5, 2.5, 2.5, 0.0, 0.0, 0.0))
+    lod.models.append(rf.RmvModel(material=decal_mat, mesh=decal))
+    rmv.lods.append(lod)
+
+    with open(src_path, "wb") as handle:
+        handle.write(rf.save(rmv))
+
+    root, stats = import_rmv2.import_file(bpy.context, src_path, {
+        "import_lods": "ALL", "build_materials": True, "texture_root": "",
+        "create_attach_empties": False, "global_scale": 1.0,
+    })
+    check(stats["meshes"] == 2, "tree and decal imported")
+    bpy.context.view_layer.update()
+    objects = {obj.rmv2.model_name: obj for obj in root.children[0].objects}
+    tree_obj = objects.get("tree_mesh")
+    decal_obj = next((o for o in root.children[0].objects
+                      if o is not tree_obj), None)
+
+    names = set(tree_obj.data.attributes.keys()) if tree_obj else set()
+    check("rmv2_pivot" in names,
+          f"rest position kept as a point attribute ({sorted(names)})")
+    check("rmv2_wind_0" in names and "rmv2_wind_1" in names,
+          "eight wind weights kept as two point attributes")
+    check(tree_obj.rmv2.vertex_format == "VEGETATION",
+          f"vertex format kept ({tree_obj.rmv2.vertex_format})")
+    check("decal" in decal_obj.rmv2.extra_json,
+          "decal material remembered on the object")
+    check(any(slot.path == "rigidmodels/decals/mud_01"
+              for slot in decal_obj.rmv2.textures),
+          "decal texture path became a texture slot")
+
+    activate_collection(root.name)
+    stats, warnings = export_rmv2.export_file(bpy.context, dst_path, {
+        "source": "AUTO", "version": "6", "skeleton_name": "",
+        "apply_modifiers": True, "high_precision": True,
+        "write_attach_points": True, "global_scale": 1.0,
+    })
+    print("  export warnings:", warnings or "none")
+
+    with open(dst_path, "rb") as handle:
+        result = rf.load(handle.read())
+    out = {m.material.model_name or type(m.material).__name__: m
+           for m in result.lods[0].models}
+    tree_out = next((m for m in result.lods[0].models
+                     if m.material.vertex_format == rf.VF_VEGETATION), None)
+    decal_out = next((m for m in result.lods[0].models
+                      if isinstance(m.material, rf.DecalMaterial)), None)
+
+    check(tree_out is not None, "tree exported as a vegetation mesh")
+    if tree_out is not None:
+        pivot = tree_out.mesh.extras.get("pivot")
+        wind = tree_out.mesh.extras.get("wind")
+        # Every vertex carries the same values here, so a broadcast
+        # comparison holds however Blender welded the mesh.
+        check(pivot is not None
+              and np.allclose(pivot, [0.25, 0.5, -0.125, 1.0], atol=2e-3),
+              f"rest position survived the round trip ({None if pivot is None else pivot[0]})")
+        check(wind is not None
+              and np.allclose(wind, [0.0, 1.0, 2.0, 0.0, 1.0, 1.0, 1.0, 0.5],
+                              atol=2e-3),
+              f"wind weights survived the round trip ({None if wind is None else wind[0]})")
+    check(decal_out is not None, "decal exported as a decal material")
+    if decal_out is not None:
+        check(decal_out.material.texture_path == "rigidmodels/decals/mud_01",
+              "decal path kept")
+        check(len(decal_out.material.values) == 9
+              and abs(decal_out.material.values[3] - 2.5) < 1e-6,
+              "decal float block kept")
+        check(decal_out.material.compute_size(6) == 292,
+              "decal material is the size it was")
+
+
 def roundtrip_case(tmpdir, version, vertex_format, label):
     print(f"\n=== Roundtrip {label} (v{version}) ===")
     reset_scene()
@@ -2705,6 +2810,7 @@ def main():
         # Rome 2's first version, whose strings are UTF-16 at twice the
         # width - the whole export path has to agree about that.
         roundtrip_case(tmpdir, 5, rf.VF_WEIGHTED, "weighted_v5")
+        vegetation_case(tmpdir)
         native_export_case(tmpdir)
         default_textures_case()
         auto_lod_case(tmpdir)

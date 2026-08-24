@@ -85,6 +85,17 @@ def _build_extra_json(material, model) -> str:
         if material.vec4_params:
             extra["vec4_params"] = [[i, list(v)]
                                     for i, v in material.vec4_params]
+    elif isinstance(material, rf.DecalMaterial):
+        # The path is already a texture slot; what is left is the float
+        # block, whose length is which decal version this is.
+        extra["material_kind"] = "decal"
+        extra["decal_values"] = [float(v) for v in material.values]
+    elif isinstance(material, rf.TerrainTileMaterial):
+        extra["material_kind"] = "terrain_tile"
+        extra["terrain_words"] = [int(v) for v in material.unknowns]
+    elif isinstance(material, rf.EmptyMaterial):
+        # Nothing to keep but the fact that there was no header at all.
+        extra["material_kind"] = "empty"
     elif isinstance(material, rf.Shogun2Material):
         # A Shogun 2 material is a run of fixed-width fields whose exact
         # composition depends on the material id, and several ids have
@@ -93,6 +104,14 @@ def _build_extra_json(material, model) -> str:
         # fields the user can actually edit back into it.
         extra["s2_material_raw"] = _bytes_to_hex(material.raw)
         extra["s2_material_version"] = material.version
+    if getattr(material, "trailing", b""):
+        # Cloth, rope and collision shapes: a simulation block this
+        # add-on does not interpret and Blender could not rebuild.
+        extra["material_trailing"] = _bytes_to_hex(material.trailing)
+    if model.section_tail:
+        extra["section_tail"] = _bytes_to_hex(model.section_tail)
+    if model.declared_vertex_count is not None:
+        extra["declared_vertex_count"] = int(model.declared_vertex_count)
     if any(model.shader_extra):
         extra["shader_extra"] = _bytes_to_hex(model.shader_extra)
     if any(model.shader_zero):
@@ -161,6 +180,10 @@ def _build_mesh_object(model, version: int, name: str, scale: float,
                                     utils.flip_uv_v(mesh_data.uv1), loop_vidx)
         if _material_has_colour(mesh_data.raw_format, version):
             mesh_build.add_colour_attribute(me, mesh_data.colours)
+        if mesh_data.extras:
+            # Vegetation and tree billboards carry channels no standard
+            # mesh field can hold; they ride along as point attributes.
+            mesh_build.add_extra_attributes(me, mesh_data.extras)
         mesh_build.set_custom_normals(
             me, utils.game_to_blender(mesh_data.normals))
 

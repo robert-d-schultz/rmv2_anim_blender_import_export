@@ -114,6 +114,62 @@ def add_colour_attribute(me, colours: np.ndarray, name: str = "Colour"):
     return ca
 
 
+# Channels a vertex layout carries that none of the standard mesh fields
+# can hold - a vegetation vertex's rest position and its eight wind
+# weights (see rmv2_format.RmvMeshData.extras).  Blender's generic point
+# attributes are exactly the right home for them: they survive editing,
+# they show up in the spreadsheet, and they are what lets those layouts
+# be exported and not just imported.  Four floats at a time, because
+# FLOAT_COLOR is the widest generic type a mesh attribute has.
+EXTRA_ATTRIBUTE_PREFIX = "rmv2_"
+
+
+def extra_attribute_names(key: str, width: int) -> list:
+    """The attribute name(s) a channel of `width` floats is stored under."""
+    parts = (width + 3) // 4
+    if parts == 1:
+        return [EXTRA_ATTRIBUTE_PREFIX + key]
+    return [f"{EXTRA_ATTRIBUTE_PREFIX}{key}_{i}" for i in range(parts)]
+
+
+def add_extra_attributes(me, extras: dict) -> None:
+    """Write rmv2_format's per-vertex extras onto the mesh."""
+    for key, values in sorted(extras.items()):
+        values = np.asarray(values, np.float32)
+        if values.ndim != 2 or not len(values):
+            continue
+        names = extra_attribute_names(key, values.shape[1])
+        for i, name in enumerate(names):
+            block = np.zeros((len(values), 4), np.float32)
+            chunk = values[:, i * 4:(i + 1) * 4]
+            block[:, :chunk.shape[1]] = chunk
+            attr = me.attributes.new(name=name, type="FLOAT_COLOR",
+                                     domain="POINT")
+            attr.data.foreach_set("color", block.ravel())
+
+
+def read_extra_attributes(me, layout: dict) -> dict:
+    """The inverse, per Blender vertex.  `layout` maps a channel name to
+    its width; a channel the mesh has no attribute for is skipped, and
+    the exporter substitutes zeros."""
+    out = {}
+    for key, width in layout.items():
+        names = extra_attribute_names(key, width)
+        if any(name not in me.attributes for name in names):
+            continue
+        block = np.zeros((len(me.vertices), 4 * len(names)), np.float32)
+        for i, name in enumerate(names):
+            attr = me.attributes[name]
+            if attr.domain != "POINT" or len(attr.data) != len(me.vertices):
+                break
+            flat = np.zeros(len(me.vertices) * 4, np.float32)
+            attr.data.foreach_get("color", flat)
+            block[:, i * 4:(i + 1) * 4] = flat.reshape(-1, 4)
+        else:
+            out[key] = block[:, :width]
+    return out
+
+
 def set_custom_normals(me, normals_b: np.ndarray) -> None:
     """Custom split normals from per-vertex normals, skipped when the
     file had none to give (an all-zero block)."""

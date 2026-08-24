@@ -21,6 +21,7 @@ import re
 import bpy
 import numpy as np
 
+from . import mesh_build
 from . import rmv2_format as rf
 from . import skeleton
 from . import utils
@@ -687,7 +688,10 @@ def _resolve_vertex_format(settings, bone_map, me, warnings, obj_name,
         choice = "AUTO"
     if choice != "AUTO":
         fmt = VERTEX_FORMAT_TO_INT[choice]
-        if fmt != rf.VF_STATIC and not bone_map:
+        # Only the two skinned layouts need bone weights.  Terrain,
+        # vegetation and decal layouts have no weights at all, so a mesh
+        # without vertex groups is exactly what they expect.
+        if fmt in (rf.VF_WEIGHTED, rf.VF_CINEMATIC) and not bone_map:
             warnings.append(
                 f"{obj_name}: {choice.lower()} format requested but no "
                 "bone-mapped vertex groups found; exporting as Static")
@@ -765,6 +769,34 @@ def _shogun2_material_from_settings(obj, settings, fmt: int, version: int,
     return mat
 
 
+def _short_material_from_settings(kind: str, settings, fmt: int,
+                                  material_id: int, extra: dict,
+                                  obj_name: str):
+    """Rebuild one of the materials that is not the weighted layout.
+
+    Which one is remembered from the import (extra["material_kind"]),
+    because nothing about a Blender mesh implies it.  A kind that no
+    longer matches the material id the user has chosen is ignored - the
+    id is the thing they can see and edit, so it wins.
+    """
+    if kind == "empty":
+        return rf.EmptyMaterial(material_id=material_id,
+                                vertex_format=fmt)
+    if kind == "decal" and material_id in rf._DECAL_IDS:
+        path = next((slot.path for slot in settings.textures
+                     if slot.path), "")
+        values = tuple(float(v) for v in extra.get("decal_values", ()))
+        return rf.DecalMaterial(material_id=material_id, vertex_format=fmt,
+                                texture_path=path, values=values)
+    if kind == "terrain_tile" and material_id in rf._TERRAIN_TILE_IDS:
+        words = tuple(int(v) for v in extra.get("terrain_words", ()))
+        return rf.TerrainTileMaterial(
+            material_id=material_id, vertex_format=fmt,
+            model_name=(settings.model_name or obj_name),
+            unknowns=words or (0, 0, 0, 0, 0, 0))
+    return None
+
+
 def _material_from_settings(obj, settings, fmt: int, scale: float,
                             attach_points, options) -> rf.WeightedMaterial:
     extra = {}
@@ -778,6 +810,14 @@ def _material_from_settings(obj, settings, fmt: int, scale: float,
     if version in rf.SHOGUN2_VERSIONS:
         return _shogun2_material_from_settings(obj, settings, fmt, version,
                                                extra)
+
+    kind = extra.get("material_kind")
+    if kind:
+        short = _short_material_from_settings(
+            kind, settings, fmt, _resolve_material_id(settings, fmt), extra,
+            utils.strip_blender_suffix(obj.name))
+        if short is not None:
+            return short
 
     pivot_b = obj.matrix_world.translation
     mat = rf.WeightedMaterial(
@@ -826,6 +866,11 @@ def _material_from_settings(obj, settings, fmt: int, scale: float,
 
     if options.get("write_attach_points", True):
         mat.attachment_points = list(attach_points)
+    if "material_trailing" in extra:
+        try:
+            mat.trailing = bytes.fromhex(extra["material_trailing"])
+        except ValueError:
+            pass
     return mat
 
 
@@ -915,6 +960,15 @@ def build_model(context, obj, options, attach_points, attach_names,
         mesh.uv0 = uv0_q[unique_idx].view(np.float16).astype(np.float32)
         mesh.uv1 = uv1_q[unique_idx].view(np.float16).astype(np.float32)
         mesh.colours = col_q[unique_idx].astype(np.float32) / 255.0
+        # Channels the vertex layout carries beyond the usual ones - a
+        # vegetation vertex's rest position and wind weights - come back
+        # off the mesh as point attributes, one value per Blender vertex,
+        # so they are gathered the same way positions are.
+        layout = rf.extra_channels(fmt)
+        if layout:
+            for key, values in mesh_build.read_extra_attributes(
+                    me, layout).items():
+                mesh.extras[key] = values[src_vidx]
         if k:
             mesh.bone_indices = vert_bone_idx[src_vidx]
             mesh.bone_weights = vert_bone_wgt[src_vidx]
@@ -948,6 +1002,16 @@ def build_model(context, obj, options, attach_points, attach_names,
         except ValueError:
             pass
 
+        section_tail = b""
+        if "section_tail" in extra:
+            # Attila's ropes keep a run of further indices after the
+            # index block; there is nothing in Blender that stands for
+            # it, so it rides along in the object's extra data.
+            try:
+                section_tail = bytes.fromhex(extra["section_tail"])
+            except ValueError:
+                section_tail = b""
+
         return rf.RmvModel(
             material=material,
             mesh=mesh,
@@ -955,6 +1019,7 @@ def build_model(context, obj, options, attach_points, attach_names,
             shader_name=shader_name,
             shader_extra=shader_extra,
             shader_zero=shader_zero,
+            section_tail=section_tail,
         )
     finally:
         arrays["source_object"].to_mesh_clear()

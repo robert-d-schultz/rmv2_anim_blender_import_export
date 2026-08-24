@@ -1,7 +1,8 @@
 # Where this stands, and what's left
 
-Written 2026-08-23, after version 1.15.0 (Rome 2 and Attila read; every
-format version writes). Roughly in priority order within each group.
+Written 2026-08-23, after version 1.16.0 (Rome 2 and Attila read, every
+format version writes, and every vertex layout the add-on reads it can
+also write). Roughly in priority order within each group.
 
 ## Needs a human
 
@@ -20,6 +21,12 @@ New UI to look at:
 - **"Other Formats" box** on the RMV2 collection panel, showing
   `arm_version`, `vmpf_version` and `vwm_version` together.
 - **Header Type** row on the armature panel (the `.anim` header word).
+- **Seven more entries in the Vertex Format picker** (Position, Grass,
+  Vegetation, Tree Billboard and friends), and the point attributes the
+  vegetation ones bring with them - `rmv2_pivot`, `rmv2_wind_0`,
+  `rmv2_wind_1`. Worth opening a real tree in the spreadsheet to see
+  whether that presentation is any use to a modder, or whether those
+  eight numbers want naming.
 
 Expected outcome, as you predicted: most of this should be hidden unless
 it applies. A collection imported from a `.variant_part_mesh` has no use
@@ -234,15 +241,20 @@ that, the honest fallback is to keep an unknown material's bytes
 verbatim the way the cloth block is kept - it would clear the whole tail
 at once, at the cost of not knowing what is in them.
 
-### 8. Vertex formats that read but do not write
+### 8. Vertex formats that read but do not write - done
 
-`Collision`, `Position16`, the two custom-terrain layouts, and the five
-added for Rome 2 and Attila (vegetation, tree billboard, grass, position
-and uv, and the position-only one under a terrain tile). Related to 7 but a separate job: 7 is about parsing files at all,
-this is about writing layouts already understood. Three of the four new
-ones carry per-vertex fields `RmvMeshData` has nowhere to put - a rest
-position and eight halves of wind sway - so they would need somewhere
-to live before a mesh could be rebuilt from Blender.
+Every layout this add-on reads, it now writes, and every one of them
+survives a Blender round trip. The channels that have no ordinary mesh
+field - a vegetation vertex's rest position and eight wind weights, a
+bow wave's second position, custom terrain's two spare colour channels -
+live in `RmvMeshData.extras` and travel through Blender as point
+attributes (`rmv2_pivot`, `rmv2_wind_0`, ...).
+
+What is left of this entry is a question rather than a gap: the wind
+weights are eight halves whose meaning is unknown, and five of the eight
+are constant per mesh in every vanilla file looked at. If they were ever
+identified they could be presented as something better than eight
+numbers - a stiffness, a phase, an amplitude.
 
 ### 9. Smaller things
 
@@ -256,14 +268,6 @@ to live before a mesh could be rebuilt from Blender.
   Out of scope deliberately.
 - **`.rigid_model_v2` v0** — 4 Shogun 2 files, no skeleton-name field and
   meshes beyond what its LOD table declares. Refused cleanly.
-- **The new material types import but do not survive a re-export.** A
-  decal, terrain tile or bow wave read from a file comes back out of
-  Blender as an ordinary weighted material, because that is all the
-  exporter builds. The same has always been true of custom terrain, so
-  it is not a regression - but it is now true of far more files. Fixing
-  it means either carrying the material verbatim through the extra-JSON
-  the way Shogun 2 materials are carried, or teaching the exporter to
-  build each type.
 - **`.anim` v6 is still unread from a vanilla file**, and Attila was the
   last good guess. Warhammer 1 and 2 are what is left to check.
 - **Empire, Napoleon and Shogun 2 are uninstalled**, so `samples/` is now

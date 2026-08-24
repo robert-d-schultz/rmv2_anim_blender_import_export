@@ -30,6 +30,24 @@ VERTEX_FORMAT_ITEMS = [
     ("STATIC", "Static", "No bone weights (buildings, props). 2 UV channels"),
     ("WEIGHTED", "Weighted", "2 bone influences per vertex"),
     ("CINEMATIC", "Cinematic", "4 bone influences per vertex"),
+    # Rome 2 and Attila's terrain, vegetation and decal layouts.  A mesh
+    # imported as one of these keeps it, so a tree exports as a tree.
+    ("POSITION16", "Position (float)",
+     "Four float32 - position only, used by decals (16 bytes)"),
+    ("POSITION_HALF", "Position (half)",
+     "A half4 position and nothing else, under a terrain tile (8 bytes)"),
+    ("POSITION_UV", "Position+UV",
+     "Position and one UV, no tangent frame - water planes and the "
+     "flat card a tree collapses to (12 bytes)"),
+    ("GRASS", "Grass",
+     "Position, float32 UVs and a byte tangent frame (28 bytes)"),
+    ("TREE_BILLBOARD", "Tree Billboard",
+     "Position, normal and UV as halves, plus four unused (28 bytes)"),
+    ("VEGETATION", "Vegetation",
+     "Trees and shrubs: a half tangent frame, a rest position and eight "
+     "wind weights, the last two kept as point attributes (60 bytes)"),
+    ("COLLISION", "Collision",
+     "Float32 position and normal, no UVs (24 bytes)"),
     # Shogun 2 only. Its materials have no vertex-format field - the game
     # infers the layout from the stride - so keeping the one a mesh was
     # imported with matters: its material expects that exact stride.
@@ -40,9 +58,9 @@ VERTEX_FORMAT_ITEMS = [
     ("S2_STATIC_FLOAT", "Shogun 2 Static (float)",
      "Shogun 2: Static with full float32 positions and UVs (44 bytes)"),
     ("S2_BOW_WAVE", "Shogun 2 Bow Wave",
-     "Shogun 2: the bow_wave effect layout (24 bytes). Read-only - it "
-     "carries a second position channel that cannot be rebuilt from a "
-     "Blender mesh, so an edited bow_wave mesh cannot be exported"),
+     "Shogun 2 and Rome 2's ships: the bow_wave layout (24 bytes). Its "
+     "second position channel - where the crest travels to - is kept as "
+     "a point attribute"),
     # .variant_part_mesh only. Like the Shogun 2 entries above, the file
     # has no vertex-format field of its own - the layout is chosen by the
     # header - so the one a mesh was imported with is what should be
@@ -64,6 +82,13 @@ VERTEX_FORMAT_TO_INT = {
     "STATIC": rf.VF_STATIC,
     "WEIGHTED": rf.VF_WEIGHTED,
     "CINEMATIC": rf.VF_CINEMATIC,
+    "POSITION16": rf.VF_POSITION16,
+    "POSITION_HALF": rf.VF_POSITION_HALF,
+    "POSITION_UV": rf.VF_POSITION_UV,
+    "GRASS": rf.VF_GRASS,
+    "TREE_BILLBOARD": rf.VF_TREE_BILLBOARD,
+    "VEGETATION": rf.VF_VEGETATION,
+    "COLLISION": rf.VF_COLLISION,
     "S2_POSITION_UV": rf.VF_S2_POSITION_UV,
     "S2_STATIC": rf.VF_S2_STATIC_NO_UV2,
     "S2_STATIC_FLOAT": rf.VF_S2_STATIC_FLOAT,

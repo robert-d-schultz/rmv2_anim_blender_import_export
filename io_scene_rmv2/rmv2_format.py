@@ -467,6 +467,14 @@ class RmvMeshData:
     bone_weights: np.ndarray         # (n,k) float32
     indices: np.ndarray              # (m,) uint16, DirectX winding (CW front)
 
+    # Per-vertex channels that none of the fields above can hold: the
+    # rest position and wind weights on a vegetation vertex, the four
+    # halves after a tree billboard's uv.  Keyed by the name the layout
+    # gives them, each an (n, k) float32 array.  The Blender side stores
+    # these as point attributes, which is what lets those layouts be
+    # written and not just read.
+    extras: dict = field(default_factory=dict)
+
     # Original vertex bytes, kept on load so an unmodified mesh re-saves
     # byte-identically (quantization is lossy, passthrough is not).  Set
     # raw_block = None after modifying any vertex array.
@@ -492,6 +500,7 @@ class RmvMeshData:
             bone_indices=np.zeros((n, weight_count), np.uint8),
             bone_weights=np.zeros((n, weight_count), np.float32),
             indices=np.zeros((0,), np.uint16),
+            extras={},
         )
 
 
@@ -634,6 +643,10 @@ def decode_vertices(buf: bytes, offset: int, count: int, stride: int,
         mesh.uv0 = raw["uv"].astype(np.float32)
         if "uv2" in names:
             mesh.uv1 = raw["uv2"].astype(np.float32)
+        if vertex_format == VF_S2_BOW_WAVE:
+            mesh.extras["pos2"] = raw["pos2"].astype(np.float32)
+            mesh.extras["unknown"] = \
+                raw["unknown"].astype(np.float32).reshape(-1, 1)
         if "normal" in names:
             mesh.normals = _decode_byte_vec(raw["normal"])[:, ::-1].copy()
             mesh.tangents = _decode_byte_vec(raw["tangent"])[:, ::-1].copy()
@@ -646,12 +659,15 @@ def decode_vertices(buf: bytes, offset: int, count: int, stride: int,
                 np.array([0.0, 0.0, 0.0, 1.0], np.float32), (count, 1))
     elif vertex_format in (VF_COLLISION, VF_POSITION16):
         mesh.positions = _decode_position_float(raw["pos"])
+        if vertex_format == VF_COLLISION:
+            mesh.normals = raw["normal"].astype(np.float32)
     elif vertex_format == VF_POSITION_HALF:
         mesh.positions = _decode_position_half4(raw["pos"])
     elif vertex_format == VF_TREE_BILLBOARD:
         mesh.positions = _decode_position_half4(raw["pos"])
         mesh.normals = raw["normal"][:, :3].astype(np.float32)
         mesh.uv0 = raw["uv"].astype(np.float32)
+        mesh.extras["unknown"] = raw["unknown"].astype(np.float32)
     elif vertex_format == VF_GRASS:
         mesh.positions = _decode_position_half4(raw["pos"])
         mesh.uv0 = raw["uv"].astype(np.float32)
@@ -664,12 +680,18 @@ def decode_vertices(buf: bytes, offset: int, count: int, stride: int,
         mesh.tangents = raw["tangent"][:, :3].astype(np.float32)
         mesh.binormals = raw["binormal"][:, :3].astype(np.float32)
         mesh.uv0 = raw["uv"].astype(np.float32)
+        mesh.extras["pivot"] = raw["pivot"].astype(np.float32)
+        mesh.extras["wind"] = raw["wind"].astype(np.float32)
     elif vertex_format in (VF_CUSTOM_TERRAIN, VF_CUSTOM_TERRAIN2):
         mesh.positions = _decode_position_float(raw["pos"])
         mesh.normals = _decode_position_float(raw["normal"])
         mesh.uv0 = raw["uv"].astype(np.float32)
         if vertex_format == VF_CUSTOM_TERRAIN2:
             mesh.colours = raw["col0"].astype(np.float32) / 255.0
+            # Two further colour channels, which the mesh has one slot
+            # for; they keep their raw byte values.
+            mesh.extras["col1"] = raw["col1"].astype(np.float32)
+            mesh.extras["col2"] = raw["col2"].astype(np.float32)
 
     mesh.raw_block = bytes(buf[offset:offset + count * stride])
     mesh.raw_format = vertex_format
@@ -682,10 +704,16 @@ def _encode_vertices_shogun2(mesh: RmvMeshData, raw: np.ndarray,
                              high_precision: bool) -> bytes:
     """Encode the Shogun 2 vertex layouts.  The tangent frame is stored
     X/Z swapped, exactly as in the modern Static vertex (see
-    decode_vertices).  VF_S2_BOW_WAVE is not handled here: it carries a
-    second position channel RmvMeshData has nowhere to put, so it stays
-    read-only and relies on raw_block passthrough."""
+    decode_vertices).  The bow wave's second position channel - where the
+    crest travels to - has no standard field to live in and rides in
+    mesh.extras, the same way a vegetation vertex's does."""
     names = dt.names
+    if vertex_format == VF_S2_BOW_WAVE:
+        raw["pos"] = encode_position_half4(mesh.positions, high_precision)
+        raw["pos2"] = _extra(mesh, "pos2", 4)
+        raw["uv"] = mesh.uv0.astype(np.float16)
+        raw["unknown"] = _extra(mesh, "unknown", 1).reshape(-1)
+        return raw.tobytes()
     if vertex_format == VF_S2_STATIC_FLOAT:
         raw["pos"] = np.asarray(mesh.positions, np.float32)
         raw["uv"] = np.asarray(mesh.uv0, np.float32)
@@ -701,6 +729,83 @@ def _encode_vertices_shogun2(mesh: RmvMeshData, raw: np.ndarray,
     if "col" in names:
         raw["col"] = np.clip(
             np.round(mesh.colours * 255.0), 0, 255).astype(np.uint8)
+    return raw.tobytes()
+
+
+# The per-vertex channels each layout carries beyond the standard fields,
+# and how wide each is.  The Blender side uses this to know what to look
+# for on a mesh; see mesh_build.read_extra_attributes.
+EXTRA_CHANNELS = {
+    VF_VEGETATION: {"pivot": 4, "wind": 8},
+    VF_TREE_BILLBOARD: {"unknown": 4},
+    VF_S2_BOW_WAVE: {"pos2": 4, "unknown": 1},
+    VF_CUSTOM_TERRAIN2: {"col1": 4, "col2": 4},
+}
+
+
+def extra_channels(vertex_format: int) -> dict:
+    return EXTRA_CHANNELS.get(vertex_format, {})
+
+
+def _extra(mesh: RmvMeshData, name: str, width: int) -> np.ndarray:
+    """A channel from mesh.extras, or zeros when the mesh never had one -
+    a vegetation mesh built in Blender from scratch, say."""
+    values = mesh.extras.get(name)
+    n = mesh.vertex_count
+    if values is None:
+        return np.zeros((n, width), np.float32)
+    values = np.asarray(values, np.float32)
+    if values.shape != (n, width):
+        out = np.zeros((n, width), np.float32)
+        rows = min(n, len(values))
+        cols = min(width, values.shape[1] if values.ndim > 1 else 0)
+        if rows and cols:
+            out[:rows, :cols] = values[:rows, :cols]
+        return out
+    return values
+
+
+def _half4_direction(values: np.ndarray, count: int) -> np.ndarray:
+    """A three-component direction in a half4 field; the fourth component
+    is zero in every vanilla vertex of these layouts."""
+    out = np.zeros((count, 4), np.float16)
+    out[:, :3] = np.asarray(values, np.float32)[:, :3]
+    return out
+
+
+def _encode_vertices_vegetation(mesh: RmvMeshData, raw: np.ndarray,
+                                vertex_format: int,
+                                high_precision: bool) -> bytes:
+    """The layouts Rome 2 added for vegetation, grass and water.
+
+    They were read-only until the two channels a vegetation vertex
+    carries beyond the usual ones - a rest position and eight wind
+    weights - had somewhere to live; see RmvMeshData.extras.
+    """
+    n = mesh.vertex_count
+    raw["pos"] = encode_position_half4(mesh.positions, high_precision)
+    if vertex_format == VF_POSITION_HALF:
+        return raw.tobytes()
+
+    raw["uv"] = mesh.uv0.astype(
+        np.float32 if vertex_format == VF_GRASS else np.float16)
+    if vertex_format == VF_GRASS:
+        # The one layout whose tangent frame is byte-encoded, and the one
+        # whose uvs are full float32.
+        raw["normal"] = _encode_byte_vec(mesh.normals)
+        raw["tangent"] = _encode_byte_vec(mesh.tangents)
+        raw["binormal"] = _encode_byte_vec(mesh.binormals)
+        return raw.tobytes()
+
+    raw["normal"] = _half4_direction(mesh.normals, n)
+    if vertex_format == VF_TREE_BILLBOARD:
+        raw["unknown"] = _extra(mesh, "unknown", 4)
+        return raw.tobytes()
+
+    raw["tangent"] = _half4_direction(mesh.tangents, n)
+    raw["binormal"] = _half4_direction(mesh.binormals, n)
+    raw["pivot"] = _extra(mesh, "pivot", 4)
+    raw["wind"] = _extra(mesh, "wind", 8)
     return raw.tobytes()
 
 
@@ -728,9 +833,40 @@ def encode_vertices(mesh: RmvMeshData, vertex_format: int, version: int,
     names = dt.names
 
     if vertex_format in (VF_S2_POSITION_UV, VF_S2_STATIC_NO_UV2,
-                         VF_S2_STATIC_FLOAT):
+                         VF_S2_STATIC_FLOAT, VF_S2_BOW_WAVE):
         return _encode_vertices_shogun2(mesh, raw, dt, vertex_format,
                                         high_precision)
+
+    if vertex_format in (VF_POSITION_HALF, VF_TREE_BILLBOARD, VF_GRASS,
+                         VF_VEGETATION):
+        return _encode_vertices_vegetation(mesh, raw, vertex_format,
+                                           high_precision)
+
+    if vertex_format in (VF_CUSTOM_TERRAIN, VF_CUSTOM_TERRAIN2):
+        # Float32 position and normal, both through the W-scale
+        # convention _decode_position_float reads them by.
+        raw["pos"][:, :3] = np.asarray(mesh.positions, np.float32)
+        raw["pos"][:, 3] = 1.0
+        raw["normal"][:, :3] = np.asarray(mesh.normals, np.float32)
+        raw["normal"][:, 3] = 1.0
+        raw["uv"] = mesh.uv0.astype(np.float16)
+        if vertex_format == VF_CUSTOM_TERRAIN2:
+            raw["col0"] = np.clip(
+                np.round(mesh.colours * 255.0), 0, 255).astype(np.uint8)
+            for name in ("col1", "col2"):
+                raw[name] = np.clip(
+                    np.round(_extra(mesh, name, 4)), 0, 255).astype(np.uint8)
+        return raw.tobytes()
+
+    if vertex_format in (VF_COLLISION, VF_POSITION16):
+        # Float32 positions, and for collision a float32 normal - nothing
+        # quantized, nothing this module has to guess at.
+        raw["pos"][:, :3] = np.asarray(mesh.positions, np.float32)
+        if vertex_format == VF_POSITION16:
+            raw["pos"][:, 3] = 1.0
+        else:
+            raw["normal"] = np.asarray(mesh.normals, np.float32)
+        return raw.tobytes()
 
     if vertex_format not in (VF_STATIC, VF_WEIGHTED, VF_CINEMATIC):
         raise RmvFormatError(

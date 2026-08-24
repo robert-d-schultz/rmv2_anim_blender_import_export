@@ -46,12 +46,22 @@ to put something — a Empire-era object has one texture slot, not four —
 the export says what it dropped rather than refusing.
 
 **Per mesh** you get positions, custom split normals, the full tangent
-basis, both UV channels, vertex colours and bone weights. *Static*,
-*Weighted* (2 bone influences) and *Cinematic* (4) are read and written;
-collision, `Position16`, the two custom-terrain layouts and the five
-added for Rome 2 and Attila (trees, their billboards, grass, the plain
-position-and-uv one water planes use, and the position-only one under a
-terrain tile) are import-only.
+basis, both UV channels, vertex colours and bone weights. **Every vertex
+layout the add-on reads, it also writes** — the skinned ones, collision,
+`Position16`, both custom-terrain layouts, Shogun 2's four, and the five
+Rome 2 and Attila added for trees, their billboards, grass, water planes
+and terrain tiles.
+
+Some of those layouts carry per-vertex data no ordinary mesh has a slot
+for: a vegetation vertex stores the rest position its branch sways from
+and eight wind weights, a bow wave stores a second position for where
+the crest travels to, custom terrain has two spare colour channels.
+Those ride through Blender as **point attributes** — `rmv2_pivot`,
+`rmv2_wind_0`, `rmv2_pos2` and so on — visible in the spreadsheet,
+editable, and read back on export. The same goes for the material types
+that are not the weighted layout: a decal, a terrain tile or a bow wave
+imported from a file is exported as what it was, not flattened into an
+ordinary material.
 
 **Round-trip fidelity.** Re-saving an unmodified file byte-for-byte is a
 tested invariant, checked against every file the games ship:
