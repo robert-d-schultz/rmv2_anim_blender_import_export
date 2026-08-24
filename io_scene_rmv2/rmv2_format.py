@@ -1691,6 +1691,20 @@ class RmvModel:
     # section size is authoritative, so whatever is past the indices is
     # kept and written back with the mesh.
     section_tail: bytes = b""
+    # Warhammer 3's generated tree billboards - the flat card a tree
+    # collapses to past 5000 units - are written by something other than
+    # the tool that writes the rest of the file, and lay their section
+    # out the other way round: material, then the index block, then the
+    # vertices.  What gives it away is index_offset < vertex_offset with
+    # the indices exactly filling the gap between them.
+    indices_first: bool = False
+    # The same meshes declare a mesh_section_size that stops at the
+    # vertex block instead of covering it, so the vertices run past the
+    # end of their own section to the end of the file.  That works only
+    # because such a mesh is always the last one in the file - all 629 in
+    # Warhammer 3 are - and it means the size cannot be recomputed on
+    # save, only written back.
+    declared_section_size: Optional[int] = None
     # None means "compute from the mesh on save"; loading fills these in so
     # unmodified files keep their original values.
     bbox_min: Optional[tuple] = None
@@ -1837,7 +1851,13 @@ def _load_model(buf: bytes, offset: int, version: int) -> tuple[RmvModel, int]:
     shader_name, shader_extra, shader_zero = vals[13:16]
 
     material_offset = offset + common.size
-    expected_material_size = (offset + vertex_offset) - material_offset
+    # See RmvModel.indices_first.  The signature is deliberately tight:
+    # the indices must account for the whole gap, or this is a file that
+    # should still fail loudly rather than be read on a guess.
+    indices_first = (0 < index_offset < vertex_offset
+                     and index_offset + index_count * 2 == vertex_offset)
+    material_end = index_offset if indices_first else vertex_offset
+    expected_material_size = (offset + material_end) - material_offset
     material = _parse_material(buf, material_offset, model_type,
                                expected_material_size, version)
 
@@ -1845,7 +1865,19 @@ def _load_model(buf: bytes, offset: int, version: int) -> tuple[RmvModel, int]:
     # a vertex count and then ship no vertex block at all - the game
     # builds the geometry itself.  The count is kept so the file re-saves
     # as it was read (see RmvModel.written_vertex_count).
-    vertex_bytes = index_offset - vertex_offset
+    if indices_first:
+        # The vertex block is outside the section, so its length comes
+        # from what is left of the file rather than from the next offset.
+        # That is only right while such a mesh is the last one in the
+        # file, which every one of them is; a block that does not divide
+        # evenly says it is not, and is better refused than guessed at.
+        vertex_bytes = len(buf) - (offset + vertex_offset)
+        if vertex_count > 0 and vertex_bytes % vertex_count:
+            raise RmvFormatError(
+                f"Indices-first mesh: {vertex_bytes} bytes left for "
+                f"{vertex_count} vertices, which does not divide")
+    else:
+        vertex_bytes = index_offset - vertex_offset
     if vertex_count > 0 and vertex_bytes > 0:
         stride = vertex_bytes // vertex_count
         fmt = material.vertex_format
@@ -1893,7 +1925,7 @@ def _load_model(buf: bytes, offset: int, version: int) -> tuple[RmvModel, int]:
 
     consumed = index_offset + index_count * 2
     tail = (bytes(buf[offset + consumed:offset + mesh_section_size])
-            if mesh_section_size > consumed else b"")
+            if not indices_first and mesh_section_size > consumed else b"")
 
     model = RmvModel(
         material=material,
@@ -1906,10 +1938,18 @@ def _load_model(buf: bytes, offset: int, version: int) -> tuple[RmvModel, int]:
         bbox_min=tuple(bbox[0:3]),
         bbox_max=tuple(bbox[3:6]),
         section_tail=tail,
+        indices_first=indices_first,
+        declared_section_size=mesh_section_size if indices_first else None,
         declared_vertex_count=(vertex_count if not mesh.vertex_count
                                else None),
     )
-    return model, mesh_section_size
+    # What the section really occupies, which for an indices-first mesh
+    # is more than it says: the caller walks the file by this.
+    consumed_size = mesh_section_size
+    if indices_first:
+        consumed_size = max(consumed_size,
+                            vertex_offset + len(mesh.raw_block or b""))
+    return model, consumed_size
 
 
 # Shogun 2 materials carry no vertex-format field, so the layout has to be
@@ -2226,10 +2266,19 @@ def save(rmv: RmvFile, high_precision: bool = True,
     pad_width = 20 if wide else 10
     for lod, entries in zip(rmv.lods, encoded):
         for model, material_blob, vertex_blob, index_blob in entries:
-            vertex_offset = common.size + len(material_blob)
-            index_offset = vertex_offset + len(vertex_blob)
-            section_size = (index_offset + len(index_blob)
+            if model.indices_first:
+                index_offset = common.size + len(material_blob)
+                vertex_offset = index_offset + len(index_blob)
+            else:
+                vertex_offset = common.size + len(material_blob)
+                index_offset = vertex_offset + len(vertex_blob)
+            section_size = (common.size + len(material_blob)
+                            + len(vertex_blob) + len(index_blob)
                             + len(model.section_tail))
+            if model.declared_section_size is not None:
+                # Only an indices-first mesh has one, and its own size
+                # field never covered its vertices to begin with.
+                section_size = model.declared_section_size
 
             shader = _encode_name(model.shader_name, 12, wide)
             if (len(model.shader_raw) == len(shader)
@@ -2253,8 +2302,12 @@ def save(rmv: RmvFile, high_precision: bool = True,
                 *[float(v) for v in bbox_max],
                 shader, extra, zero)
             out += material_blob
-            out += vertex_blob
-            out += index_blob
+            if model.indices_first:
+                out += index_blob
+                out += vertex_blob
+            else:
+                out += vertex_blob
+                out += index_blob
             out += model.section_tail
 
     blob = bytes(out)

@@ -292,6 +292,69 @@ def vegetation_case(tmpdir):
               "decal material is the size it was")
 
 
+def billboard_case(tmpdir):
+    """Warhammer 3's generated tree billboard.
+
+    Nothing about its geometry is unusual - it is a flat card in the
+    12-byte position-and-uv layout - but its section is laid out the
+    other way round, material then indices then vertices, and its
+    declared size stops before the vertices. Neither fact has anywhere
+    to live on a Blender object, so both ride in the object's extra
+    data and have to come back out.
+    """
+    print("\n=== Generated tree billboard ===")
+    reset_scene()
+    src_path = os.path.join(tmpdir, "src_billboard.rigid_model_v2")
+    dst_path = os.path.join(tmpdir, "dst_billboard.rigid_model_v2")
+
+    rmv = rf.RmvFile(version=8, skeleton_name="tree")
+    lod = rf.RmvLod(camera_distance=5000.0, lod_level=2)
+    mesh = make_cube_mesh(0)
+    mat = rf.WeightedMaterial(material_id=89,
+                              vertex_format=rf.VF_POSITION_UV,
+                              model_name="generated_billboard")
+    mat.declared_vertex_format = rf.VF_ROME2_TREE
+    lod.models.append(rf.RmvModel(material=mat, mesh=mesh,
+                                  indices_first=True))
+    rmv.lods.append(lod)
+    with open(src_path, "wb") as handle:
+        handle.write(rf.save(rmv))
+
+    root, stats = import_rmv2.import_file(bpy.context, src_path, {
+        "import_lods": "ALL", "build_materials": True, "texture_root": "",
+        "create_attach_empties": False, "global_scale": 1.0,
+    })
+    check(stats["meshes"] == 1, "billboard imported")
+    bpy.context.view_layer.update()
+    obj = root.children[0].objects[0]
+    check("indices_first" in obj.rmv2.extra_json,
+          "the section layout is remembered on the object")
+
+    activate_collection(root.name)
+    stats, warnings = export_rmv2.export_file(bpy.context, dst_path, {
+        "source": "AUTO", "version": "8", "skeleton_name": "tree",
+        "apply_modifiers": True, "high_precision": True,
+        "write_attach_points": True, "global_scale": 1.0,
+    })
+    print("  export warnings:", warnings or "none")
+
+    with open(dst_path, "rb") as handle:
+        blob = handle.read()
+    out = rf.load(blob).lods[0].models[0]
+    check(out.indices_first, "still written indices-first")
+    check(out.material.material_id == 89, "still a tree_billboard_material")
+    check(out.mesh.raw_format == rf.VF_POSITION_UV,
+          "still the 12-byte position-and-uv layout")
+    check(len(out.mesh.indices) == len(mesh.indices),
+          f"triangles kept ({len(out.mesh.indices) // 3})")
+
+    common = rf._common_header_struct(8)
+    start = rf._file_header_struct(8).size + rf._lod_header_struct(8).size
+    _, _, _, voff, _, ioff, _ = common.unpack_from(blob, start)[0:7]
+    check(ioff < voff,
+          f"the index block really does come first ({ioff} < {voff})")
+
+
 def sway_case(tmpdir):
     """Warhammer's wind-sway prop and its interface banner.
 
@@ -2908,6 +2971,7 @@ def main():
         roundtrip_case(tmpdir, 5, rf.VF_WEIGHTED, "weighted_v5")
         vegetation_case(tmpdir)
         sway_case(tmpdir)
+        billboard_case(tmpdir)
         native_export_case(tmpdir)
         default_textures_case()
         auto_lod_case(tmpdir)

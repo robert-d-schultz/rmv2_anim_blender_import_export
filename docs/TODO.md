@@ -1,9 +1,9 @@
 # Where this stands, and what's left
 
-Written 2026-08-23, after version 1.17.0 (Rome 2, Attila and Warhammer
-read - Warhammer completely - every format version writes, and every
-vertex layout the add-on reads it can also write). Roughly in priority
-order within each group.
+Written 2026-08-24, after version 1.18.0 (Warhammer and Warhammer 3
+both read completely, every format version writes, and every vertex
+layout the add-on reads it can also write). Roughly in priority order
+within each group.
 
 ## Needs a human
 
@@ -57,6 +57,8 @@ version 1.11.0 has gone:
     7fd676e  the vegetation and decal formats through Blender    (1.16.0)
     0fc2290  the merge item brought up to date
     8400791  Warhammer - the sway vertex and the banner material (1.17.0)
+    bcf992f  that commit named in this list
+    <this>   the tree billboard, and Warhammer 3 complete      (1.18.0)
 
 Nothing on the branch is experimental - every commit ships with corpus
 sweeps and tests - but merging is your call, not this add-on's, and it
@@ -128,9 +130,10 @@ start with an install.
 
 The two newest, and the two most likely to have moved on:
 
-- **Pharaoh ships PFH6 packs.** Every reader here handles PFH0 through
+- **Pharaoh ships PFH6 packs.** The corpus tooling handles PFH0 through
   PFH5; 6 is unread. RPFM has `pfh6.rs` to work from. Expect the same
-  per-entry compression flag PFH5 uses, but that is an assumption.
+  per-entry compression flag PFH5 uses - but note from F below how that
+  flag behaved the last time it was assumed to mean one thing.
 - Troy is the era the README already attributes RMV2 v8 to ("Warhammer
   3 / Troy era"), which has never actually been checked against a Troy
   file.
@@ -236,7 +239,50 @@ buildings, chariots, war machines - rather than a character rig.  That
 is the closest that field has come to having a meaning.
 
 One thing it did *not* have: **`.anim` v6**, still unseen in any vanilla
-file.  Warhammer 2 is the last candidate before Troy.
+file.  Warhammer 2 did not have it either (F below), so Troy is the last
+candidate.
+
+### F. Warhammer 2 - censused, swept in part
+
+Installed and censused 2026-08-24, then uninstalled while the sweep was
+still running, so this entry is honest about what it does and does not
+cover.
+
+Nothing radical in the formats, as expected: **RMV2 v7 (17 836) and 36
+v6**, **`.anim` v7 (15 230) and v5 (1012)** - every one a version this
+add-on already reads and writes.  It is the game that introduced `.anim`
+v7, which Warhammer 3 and Three Kingdoms then kept.  **No `.anim` v6**,
+which was the whole reason to look: that version is now unseen across
+Empire, Napoleon, Shogun 2, Rome 2, Attila, both Warhammers and
+Warhammer 3.
+
+The sweep got through 25 684 files before the packs went away, and every
+one re-saved byte-identically: 16 143 animations and 9541 meshes, **no
+failures of any kind**.  The remaining ~8400 were never read - the
+uninstall deleted the packs underneath the run - so they are neither a
+pass nor a fail.  On the evidence this is a game with no surprises in
+it, but "no surprises in two thirds of it" is what was measured.
+
+Two things it did leave behind, both in the corpus tooling rather than
+the add-on:
+
+- **A PFH5 pack is not always zstd.** Warhammer 2 is the first PFH5
+  game and compresses with **LZMA1**; Warhammer 3 used LZMA1 too until
+  6.2, then zstd and lz4.  Which one a given entry uses is told by the
+  payload's own magic, not by the pack version
+  (`rpfm_lib/src/compression/mod.rs`).  CA's LZMA1 header is the
+  standard one with the decompressed size moved to the front and
+  narrowed to a u32, so putting it back where the format wants it - a
+  u64 after the properties byte and dictionary size - gives a plain
+  LZMA-alone stream that Python's `lzma` reads.  Before this, 3852 of
+  Warhammer 2's files looked like unreadable formats when they were
+  only compressed differently.
+- **The sweep script used to swallow that silently.** An entry that
+  failed to extract hit a bare `except: continue`, so it vanished from
+  the totals rather than being reported - which is how ~8400 files went
+  missing from a run that claimed no failures.  It now counts and names
+  them.  Worth remembering before PFH6: a file this tooling cannot
+  extract must never look like a file it read successfully.
 
 ## Known gaps
 
@@ -286,16 +332,12 @@ the name half was certain.  The v5 width (512) follows the rule the
 terrain and decal materials set rather than any v5 file, since none has
 been seen.
 
-Also still unread: Warhammer 3's `tree_billboard_material`, which is
-variable-length and starts with a CA string. A full sweep of Warhammer 3
-on 2026-08-24 (21 639 of 22 230 meshes; every `.anim`, all 34 997 of
-them) says it is now **the whole** of that game's gap - all 591
-failures, no other material type left. The sizes say what the shape is:
-the parser reads 1640 or 1700 bytes and the header is 36, 48, 54 or 60
-bytes longer, which is a trailing run of variable length rather than
-another fixed layout. Every one of them is under
-`battleterrain/vegetation/trees/`. That makes it the single highest-value
-material left in the series.
+Warhammer 3's `tree_billboard_material` came off this list the same
+day, and it was never a material at all: those 591 meshes lay their
+section out as material, index block, vertices, so reading the offsets
+in the usual order made the material look 36 to 60 bytes too long. See
+`RmvModel.indices_first`. Warhammer 3 is now complete, 22 230 of 22 230
+meshes.
 
 One loose end from the same table: Rome 2's single debug-geometry mesh
 at stride 20 with no material header *should* now resolve, since a

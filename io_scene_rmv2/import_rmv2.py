@@ -112,6 +112,11 @@ def _build_extra_json(material, model) -> str:
         extra["material_trailing"] = _bytes_to_hex(material.trailing)
     if model.section_tail:
         extra["section_tail"] = _bytes_to_hex(model.section_tail)
+    if model.indices_first:
+        # A generated tree billboard: index block before the vertex
+        # block, and a section size that stops short of the vertices.
+        extra["indices_first"] = True
+        extra["declared_section_size"] = int(model.declared_section_size or 0)
     if model.declared_vertex_count is not None:
         extra["declared_vertex_count"] = int(model.declared_vertex_count)
     if any(model.shader_extra):

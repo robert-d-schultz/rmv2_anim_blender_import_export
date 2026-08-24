@@ -89,8 +89,10 @@ tested invariant, checked against every file the games ship:
 | Attila `.rigid_model_v2` | 9971 / 10 015 |
 | Warhammer `.anim` | 6975 / 6975 — every one |
 | Warhammer `.rigid_model_v2` | 9335 / 9335 — every one |
+| Warhammer 2 `.anim` | 16 143 / 16 143 — of the two thirds swept, see below |
+| Warhammer 2 `.rigid_model_v2` | 9541 / 9541 — likewise |
 | Warhammer 3 `.anim` | 34 997 / 34 997 — every one, v5, v7 and v8 |
-| Warhammer 3 `.rigid_model_v2` | 21 639 / 22 230 — every one of the 591 that do not is a `tree_billboard_material` |
+| Warhammer 3 `.rigid_model_v2` | 22 230 / 22 230 — every one |
 
 Version 8 nearly did not make that bar, and the reason is worth knowing.
 Its byte-packed channels decode as `base + (byte / 127) × scale`, and
@@ -146,10 +148,44 @@ end of a much shorter header. Now decoded:
   after their index block.
 
 The same work moved Warhammer 3, which shares most of those materials.
-Swept in full afterwards, it stands at 21 639 of 22 230 meshes, and
-**every single one of the 591 that fail is a `tree_billboard_material`**
-— the one material class left in that game, and now the whole of its
-gap. Its animations are complete: 34 997 of 34 997, v8 included.
+Swept in full afterwards it had 591 meshes left, every one of them a
+`tree_billboard_material`, and those turned out not to be a material
+problem at all.
+
+A tree's furthest LOD is a **generated billboard** — a flat card in the
+plain 12-byte position-and-uv layout — and whatever writes it is not
+what writes the rest of the file. Its mesh section runs the other way
+round: material, then the **index block**, then the vertices. Reading
+`index_offset` and `vertex_offset` in the usual order makes the material
+look 36 to 60 bytes longer than it is, which is why it read as a
+material of unknown size. Its `mesh_section_size` then stops at the
+vertex block rather than covering it, so the vertices run past the end
+of their own section — which works only because such a mesh is always
+the last one in the file, as all 629 in Warhammer 3 are. The size cannot
+be recomputed on save, only written back.
+
+With that, **Warhammer 3 is complete**: 22 230 of 22 230 meshes and
+34 997 of 34 997 animations, v8 included.
+
+**Warhammer 2** was installed long enough to be censused and two thirds
+swept before it came off the disk again. It holds no version this add-on
+did not already read — RMV2 v7 with 36 v6, `.anim` v7 with some v5 — and
+it is where `.anim` v7 starts. Of the 25 684 files the sweep reached,
+every one re-saved byte-identically with no failure of any kind; the
+rest were never read, because the uninstall took the packs out from
+under the run, so they are neither a pass nor a fail. It also settles a
+long-running question by not answering it: **`.anim` v6 exists in no
+vanilla file of any game here**, Warhammer 2 included.
+
+Its packs were worth the visit on their own. Warhammer 2 is the first
+**PFH5** game, and a compressed PFH5 entry is not necessarily zstd —
+Warhammer 2 uses **LZMA1**, and so did Warhammer 3 until its 6.2 patch.
+The format is told by the payload's own magic rather than by the pack
+version, and CA's LZMA1 header is the standard one with the
+decompressed size moved to the front and narrowed to a u32. That is a
+fact about the corpus tooling rather than about this add-on, which reads
+loose files — but every number in the table above comes from that
+tooling.
 
 **Warhammer** is a quiet game by comparison — one mesh version and one
 animation version, RMV2 v7 and `.anim` v5, with 25 v6 meshes left over —

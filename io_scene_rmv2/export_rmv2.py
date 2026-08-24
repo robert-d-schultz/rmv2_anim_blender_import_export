@@ -1018,6 +1018,9 @@ def build_model(context, obj, options, attach_points, attach_names,
             except ValueError:
                 section_tail = b""
 
+        # A generated tree billboard: index block before the vertex
+        # block, and a section size that never covered the vertices.
+        declared_section = int(extra.get("declared_section_size") or 0)
         return rf.RmvModel(
             material=material,
             mesh=mesh,
@@ -1026,6 +1029,8 @@ def build_model(context, obj, options, attach_points, attach_names,
             shader_extra=shader_extra,
             shader_zero=shader_zero,
             section_tail=section_tail,
+            indices_first=bool(extra.get("indices_first")),
+            declared_section_size=declared_section or None,
         )
     finally:
         arrays["source_object"].to_mesh_clear()

@@ -753,6 +753,79 @@ class TestNamedMaterial(unittest.TestCase):
         self.assertEqual(rf._FORMAT_BY_STRIDE[28], rf.VF_S2_STATIC_NO_UV2)
 
 
+class TestIndicesFirstSection(unittest.TestCase):
+    """Warhammer 3's generated tree billboards lay a mesh section out the
+    other way round - material, index block, vertices - and declare a
+    section size that stops before the vertices, which run past the end
+    of their own section to the end of the file."""
+
+    def build(self):
+        rmv = rf.RmvFile(version=8, skeleton_name="tree")
+        lod = rf.RmvLod(camera_distance=5000.0, lod_level=2)
+        mesh = make_cube_mesh(0)
+        mat = rf.WeightedMaterial(material_id=89,
+                                  vertex_format=rf.VF_POSITION_UV,
+                                  model_name="generated_billboard")
+        mat.declared_vertex_format = rf.VF_ROME2_TREE
+        model = rf.RmvModel(material=mat, mesh=mesh, indices_first=True)
+        lod.models.append(model)
+        rmv.lods.append(lod)
+        return rmv, model
+
+    def test_the_blocks_are_written_in_that_order(self):
+        rmv, model = self.build()
+        blob = rf.save(rmv)
+        common = rf._common_header_struct(8)
+        start = rf._file_header_struct(8).size + rf._lod_header_struct(8).size
+        _, _, _, voff, vcount, ioff, icount = \
+            common.unpack_from(blob, start)[0:7]
+        self.assertLess(ioff, voff)
+        self.assertEqual(ioff, common.size + model.material.compute_size(8))
+        self.assertEqual(ioff + icount * 2, voff)
+
+    def test_it_round_trips(self):
+        rmv, model = self.build()
+        blob = rf.save(rmv)
+        again = rf.load(blob)
+        out = again.lods[0].models[0]
+        self.assertTrue(out.indices_first)
+        self.assertEqual(out.mesh.vertex_count, model.mesh.vertex_count)
+        self.assertEqual(len(out.mesh.indices), len(model.mesh.indices))
+        np.testing.assert_array_equal(out.mesh.indices, model.mesh.indices)
+        self.assertEqual(rf.save(again), blob)
+
+    def test_a_short_section_size_is_written_back_not_recomputed(self):
+        """CA's own files declare a size that stops at the vertex block,
+        and recomputing it would change the bytes."""
+        rmv, model = self.build()
+        blob = rf.save(rmv)
+        common = rf._common_header_struct(8)
+        start = rf._file_header_struct(8).size + rf._lod_header_struct(8).size
+        _, _, sect, voff = common.unpack_from(blob, start)[0:4]
+        again = rf.load(blob)
+        out = again.lods[0].models[0]
+        self.assertEqual(out.declared_section_size, sect)
+        out.declared_section_size = voff        # what CA writes
+        patched = rf.save(again)
+        self.assertEqual(
+            common.unpack_from(patched, start)[2], voff)
+        # And it survives another trip, vertices intact.
+        reread = rf.load(patched)
+        self.assertEqual(reread.lods[0].models[0].mesh.vertex_count,
+                         model.mesh.vertex_count)
+        self.assertEqual(rf.save(reread), patched)
+
+    def test_an_ordinary_section_is_untouched(self):
+        rmv, _ = self.build()
+        rmv.lods[0].models[0].indices_first = False
+        blob = rf.save(rmv)
+        common = rf._common_header_struct(8)
+        start = rf._file_header_struct(8).size + rf._lod_header_struct(8).size
+        _, _, _, voff, _, ioff, _ = common.unpack_from(blob, start)[0:7]
+        self.assertLess(voff, ioff)
+        self.assertFalse(rf.load(blob).lods[0].models[0].indices_first)
+
+
 class TestDeclaredFormatId(unittest.TestCase):
     """Six layouts have ids of this module's own making, because the
     file's field does not identify them.  A material built in Blender has
