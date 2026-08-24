@@ -3,7 +3,7 @@
 Import and export Creative Assembly's model and animation files directly
 in Blender — meshes, skeletons, animations, skinning, LODs and materials.
 
-Covers the modern **RMV2** era (Rome 2 → Warhammer 3), **Shogun 2**, and
+Covers the modern **RMV2** era (Rome 2 → Pharaoh Dynasties), **Shogun 2**, and
 **Empire / Napoleon** — the older games' formats are different enough to
 be a separate job each and are absent from the C# reference everything
 else here is built against.
@@ -18,9 +18,9 @@ else here is built against.
 
 | Format | Games | Import | Export |
 | --- | --- | --- | --- |
-| `.rigid_model_v2` | Rome 2 → Warhammer 3 | v5, v6, v7, v8 | same |
+| `.rigid_model_v2` | Rome 2 → Pharaoh | v5, v6, v7, v8 | same |
 | `.rigid_model_v2` | Shogun 2, and Rome 2's UI models | v1, v2, v3 | same |
-| `.anim` | Rome 2 → Warhammer 3 | v4, v5, v6, v7, v8 | same |
+| `.anim` | Rome 2 → Pharaoh | v4, v5, v6, v7, v8 | same |
 | `.anim` | Shogun 2 / Empire / Napoleon | v1 + a headerless variant | same |
 | `.animatable_rigid_model` | Shogun 2 / Empire / Napoleon | v0–v5 | same |
 | `.rigid_model` | Empire / Napoleon / Shogun 2 | v0–v5 | same |
