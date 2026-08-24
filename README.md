@@ -52,8 +52,8 @@ matters.
 | `.variant_weighted_mesh` | Skinned units, one file per LOD | Empire, Napoleon | 1, and a headerless variant (0) |
 | `.rigid_model_animation` | An object list plus its own animation | Empire, Napoleon | 3, 4, 5 |
 
-**Everything in that table reads *and* writes**, including the versions
-no other tool will write for you: `.anim` v8, RMV2 v5, and the two Rome 2
+**Everything in that table reads *and* writes**, down to `.anim` v8's
+per-bone packing, RMV2 v5's UTF-16 strings, and the two versions Rome 2
 shipped with and dropped mid-life (RMV2 v3, `.anim` v4). The exporter
 offers the whole list, so a model imported from one game can be written
 out for another.
@@ -91,9 +91,9 @@ add-on reads, it also writes.**
 | Layout | Bytes | Used by |
 | --- | --- | --- |
 | Static | 32 | Buildings and props, two UV channels |
-| Weighted / Cinematic | 32 / 44 | Skinned meshes, 2 or 4 influences per vertex |
+| Weighted / Cinematic | 28 / 32 | Skinned meshes, 2 or 4 influences per vertex — four bytes more each in v8, which adds vertex colour |
 | Collision | 24 | Collision hulls, no UVs |
-| Custom terrain ×2 | 36 | Terrain patches, with two spare colour channels |
+| Custom terrain ×2 | 36 / 48 | Terrain patches, the second with two spare colour channels |
 | Vegetation | 60 | Trees and shrubs: a rest position and eight wind weights |
 | Tree billboard | 28 | The flat card a tree's furthest LOD collapses to |
 | Grass | 28 | Grass, with float32 UVs |
