@@ -1,6 +1,6 @@
 # Where this stands, and what's left
 
-Written 2026-08-23, after version 1.14.0 (Rome 2 read end to end; every
+Written 2026-08-23, after version 1.15.0 (Rome 2 and Attila read; every
 format version writes). Roughly in priority order within each group.
 
 ## Needs a human
@@ -95,9 +95,10 @@ answer most of this quickly.
 
 ## The rest of the series
 
-Rome 2 is installed and swept (B below). Attila and Warhammer 2 are
-empty shells, Pharaoh has a single mod pack, and Troy and Thrones of
-Britannia are not on disk at all, so those still start with an install.
+Rome 2 and Attila are installed and swept (B and C below). Warhammer 2
+is an empty shell, Pharaoh has a single mod pack, and Troy and Thrones
+of Britannia are not on disk at all, so those still start with an
+install.
 
 ### A. Troy and Pharaoh - forward from Warhammer 3
 
@@ -153,13 +154,34 @@ What landed:
 Rome 2 now stands at **6012 / 6012 `.anim`** and **10 815 / 14 673
 `.rigid_model_v2`**.
 
-### C. Attila and Thrones of Britannia - next
+### C. Attila - done
 
-Attila is the obvious next install: it is the likely source of
-**`.anim` v6**, which has still never been read from a real file
-(Warhammer 3's are v8, v7 and v5; Three Kingdoms' are all v7; Rome 2's
-are v5 and v4). Expect Rome 2's v6 mesh layout to carry over - and
-expect the material gap below to be the limit there too.
+Swept 2026-08-23, right behind Rome 2, and it is the same game
+format-wise: RMV2 v6 with 208 v5 and 4 v3, `.anim` v5 with the same 31
+v4 files carried over. **No `.anim` v6 anywhere**, which was the whole
+reason this entry expected Attila to matter - see the note in Known
+gaps.
+
+Since it added no versions, the work it paid for was materials, and
+that turned out to be the last big class in every era. Now read:
+terrain tiles under their Rome 2-era ids (66 with five trailing words,
+96 and 97 with six), the projected-decal family (67, 87, 95 - a texture
+path and one, nine or ten floats), materials with no header at all (bow
+waves, one terrain-tile id), and cloth/rope/collision shapes, which are
+a weighted material followed by a simulation block that is kept as read.
+Two smaller things fell out with them: LOD headers whose declared vertex
+and index totals are zero however much the meshes hold, and mesh
+sections that carry further indices after their index block.
+
+Attila stands at **6225 / 6225 `.anim`** and **9971 / 10 015
+`.rigid_model_v2`**; the same work took Rome 2 to **14 452 / 14 673**,
+and Warhammer 3 - which shares most of those materials - from 253
+unreadable meshes to 91 in a 1-in-8 sample.
+
+### D. Thrones of Britannia - not installed
+
+The last of the middle. Expect Attila's formats exactly; the value is
+confirmation, not new support.
 
 ## Known gaps
 
@@ -184,42 +206,39 @@ bug is unreachable and can be documented rather than fixed. Do not flip
 the modern path to bone-local without that evidence — it is shipped
 behaviour, and the modern material's `pivot` field interacts with it.
 
-### 7. Materials with short headers of their own - the one real gap left
+### 7. The last of the short material headers
 
-Rome 2 made the shape of this clear. Every remaining unreadable mesh,
-in every era, fails the same way: the material id is not one of the
-three this add-on knows (weighted, custom terrain, terrain tiles), so
-the weighted layout is tried and reads off the end of a much shorter
-header. It is a material problem, not a vertex problem.
+The big ones are done (see C above). What is left is a long tail, and
+the reason it is left is evidence rather than effort: each of these is
+plainly "a name or path, then a run of words", but every vanilla example
+has the words at zero, so a layout guess has nothing to be wrong
+against.
 
-The sizes are fixed per id and per era, which is what makes them
-tractable. From Rome 2:
-
-| id | v6 size | v5 size | what |
+| id | size (v6 / v5) | files | what |
 | --- | --- | --- | --- |
-| 22 (bow_wave) | 0 | - | no material at all |
-| 48 (terrain tile) | 0 | - | no material at all |
-| 26 (non_renderable) | 80 | - | |
-| 66 (terrain tiles) | 84 | 148 | our struct is 88: Rome 2 has five trailing u32, Warhammer six |
-| 29 / 30 (texture_combo) | 288 | - | the 3D interface banners |
-| 67 (projected_decal) | 260 | 516 | a texture path plus four bytes |
-| 87 (projected_decal_v2) | 292 | - | a texture path plus a vec3 pair |
-| 40 | 544 | - | |
-| 45 (point light) | 524 | 1036 | |
-| 60 (cloth) / 62 (collision_shape) | varies | varies | |
+| 29, 30 | 288 | ~55 in Rome 2, 18 in Attila | the 3D interface banners: a 256-byte model name and eight words |
+| 45 | 524 / 1036 | ~15 | point lights - two paths and three words, going by how the two versions differ |
+| 84 | 1128 | ~7 | Attila's ship night lights |
+| 54, 57 | - / 1104, 1168 | 4 | Rome 2 and Attila's greek statues |
+| 26 | 80 | 123 models | non_renderable |
+| 40 | 544 | 96 models | unidentified, campaign settlements |
 
-Warhammer 3 has the same classes plus `tree_billboard_material`, and
-one vertex format id, **12**, that is in no enum here.
+Also still unread: Warhammer 3's `tree_billboard_material`, which is
+variable-length and starts with a CA string and is now most of what
+fails there (78 of its remaining 91 in a 1-in-8 sample), and vertex
+format id **12** at stride 20 (four files in that sample), plus Rome 2's
+one debug-geometry mesh at the same stride.
 
-Two of them are free: a size of 0 means the material is absent, and the
-vertex format then has to come from the stride the way the Shogun 2
-path already does it.
+A file with a non-zero example of any of these would settle it. Failing
+that, the honest fallback is to keep an unknown material's bytes
+verbatim the way the cloth block is kept - it would clear the whole tail
+at once, at the cost of not knowing what is in them.
 
 ### 8. Vertex formats that read but do not write
 
-`Collision`, `Position16`, the two custom-terrain layouts, and the four
-Rome 2 vegetation ones (vegetation, tree billboard, grass, position and
-uv). Related to 7 but a separate job: 7 is about parsing files at all,
+`Collision`, `Position16`, the two custom-terrain layouts, and the five
+added for Rome 2 and Attila (vegetation, tree billboard, grass, position
+and uv, and the position-only one under a terrain tile). Related to 7 but a separate job: 7 is about parsing files at all,
 this is about writing layouts already understood. Three of the four new
 ones carry per-vertex fields `RmvMeshData` has nowhere to put - a rest
 position and eight halves of wind sway - so they would need somewhere
@@ -237,6 +256,16 @@ to live before a mesh could be rebuilt from Blender.
   Out of scope deliberately.
 - **`.rigid_model_v2` v0** — 4 Shogun 2 files, no skeleton-name field and
   meshes beyond what its LOD table declares. Refused cleanly.
+- **The new material types import but do not survive a re-export.** A
+  decal, terrain tile or bow wave read from a file comes back out of
+  Blender as an ordinary weighted material, because that is all the
+  exporter builds. The same has always been true of custom terrain, so
+  it is not a regression - but it is now true of far more files. Fixing
+  it means either carrying the material verbatim through the extra-JSON
+  the way Shogun 2 materials are carried, or teaching the exporter to
+  build each type.
+- **`.anim` v6 is still unread from a vanilla file**, and Attila was the
+  last good guess. Warhammer 1 and 2 are what is left to check.
 - **Empire, Napoleon and Shogun 2 are uninstalled**, so `samples/` is now
   the only local copy of their reference files. Any further corpus sweep
   for those games needs a reinstall.

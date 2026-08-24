@@ -91,6 +91,11 @@ VF_TREE_BILLBOARD = 105   # stride 28
 # Grass, which keeps its uvs as full float32 - the only layout that does.
 VF_GRASS = 106            # stride 28
 
+# A terrain tile's base mesh: a half4 position and nothing else.  The
+# material names it TerrainBase0 and the height comes from the tile's
+# own textures, so there is nothing else to store.
+VF_POSITION_HALF = 107    # stride 8
+
 VERTEX_FORMAT_NAMES = {
     VF_STATIC: "Static",
     VF_COLLISION: "Collision",
@@ -106,6 +111,7 @@ VERTEX_FORMAT_NAMES = {
     VF_VEGETATION: "Vegetation",
     VF_TREE_BILLBOARD: "TreeBillboard",
     VF_GRASS: "Grass",
+    VF_POSITION_HALF: "PositionHalf",
     VF_ROME2_TREE: "Rome2_Tree",
     VF_ROME2_WATER: "Rome2_Water",
 }
@@ -281,6 +287,14 @@ def _encode_fixed_utf16(value: str, length: int) -> bytes:
     if len(raw) % 2:                    # never split a UTF-16 code unit
         raw = raw[:-1]
     return raw.ljust(length, b"\0")
+
+
+def _terrain_name_width(version: int) -> int:
+    return 128 if _wide_strings(version) else 64
+
+
+def _decal_path_width(version: int) -> int:
+    return 512 if _wide_strings(version) else 256
 
 
 def _wide_strings(version: int) -> bool:
@@ -528,6 +542,8 @@ def _vertex_dtype(vertex_format: int, version: int) -> np.dtype:
                   ("uv2", "<f4", (2,)), ("normal", "u1", (4,)),
                   ("tangent", "u1", (4,)), ("binormal", "u1", (4,)),
                   ("col", "u1", (4,))]
+    elif vertex_format == VF_POSITION_HALF:
+        fields = [("pos", "<f2", (4,))]
     elif vertex_format == VF_TREE_BILLBOARD:
         fields = [("pos", "<f2", (4,)), ("normal", "<f2", (4,)),
                   ("uv", "<f2", (2,)), ("unknown", "<f2", (4,))]
@@ -630,6 +646,8 @@ def decode_vertices(buf: bytes, offset: int, count: int, stride: int,
                 np.array([0.0, 0.0, 0.0, 1.0], np.float32), (count, 1))
     elif vertex_format in (VF_COLLISION, VF_POSITION16):
         mesh.positions = _decode_position_float(raw["pos"])
+    elif vertex_format == VF_POSITION_HALF:
+        mesh.positions = _decode_position_half4(raw["pos"])
     elif vertex_format == VF_TREE_BILLBOARD:
         mesh.positions = _decode_position_half4(raw["pos"])
         mesh.normals = raw["normal"][:, :3].astype(np.float32)
@@ -693,6 +711,10 @@ def encode_vertices(mesh: RmvMeshData, vertex_format: int, version: int,
     If the mesh still carries its original raw bytes (loaded and unmodified)
     and the layout matches, they are passed through unchanged so re-saving a
     file is lossless."""
+    if mesh.vertex_count == 0:
+        # Rope and light meshes declare a vertex format and then ship no
+        # vertices at all - including formats that have no layout here.
+        return b""
     dt = _vertex_dtype(vertex_format, version)
 
     if (mesh.raw_block is not None
@@ -783,6 +805,9 @@ class WeightedMaterial:
     matrix_index: int = -1
     parent_matrix_index: int = -1
     padding124: bytes = b"\0" * 124
+    # See _TRAILING_BLOCK_IDS: cloth and collision shapes carry a block
+    # after the material that this module does not interpret.
+    trailing: bytes = b""
     attachment_points: list = field(default_factory=list)
     textures: list = field(default_factory=list)      # [(type:int, path:str)]
     string_params: list = field(default_factory=list)  # [(index, str)]
@@ -800,7 +825,8 @@ class WeightedMaterial:
                 + string_size
                 + len(self.int_params) * 8
                 + len(self.float_params) * 8
-                + len(self.vec4_params) * 20)
+                + len(self.vec4_params) * 20
+                + len(self.trailing))
 
     def get_texture(self, texture_type: int) -> Optional[str]:
         for ttype, path in self.textures:
@@ -912,6 +938,7 @@ class WeightedMaterial:
             parts.append(struct.pack("<ii", idx, int(value)))
         for idx, value in self.vec4_params:
             parts.append(struct.pack("<i4f", idx, *[float(v) for v in value]))
+        parts.append(self.trailing)
         blob = b"".join(parts)
         if len(blob) != self.compute_size(version):
             raise RmvFormatError("WeightedMaterial size mismatch on write")
@@ -920,7 +947,13 @@ class WeightedMaterial:
 
 @dataclass
 class TerrainTileMaterial:
-    """Material id 101 (TerrainTiles). Read/write of the raw struct only."""
+    """The terrain-tile material: a name and a short run of u32.
+
+    Warhammer's id 101 carries six of them; Rome 2 and Attila ship two
+    variants side by side, id 66 with five and id 96 with six, both
+    named TerrainBase0.  The count follows from the header size, so it
+    is stored rather than assumed.
+    """
     material_id: int = MAT_TERRAIN_TILES
     vertex_format: int = VF_POSITION16
     model_name: str = "TerrainTile"
@@ -940,7 +973,7 @@ class TerrainTileMaterial:
     parent_matrix_index: int = -1
 
     def compute_size(self, version: int = 6) -> int:
-        return _TERRAIN_TILE_MATERIAL.size
+        return _terrain_name_width(version) + 4 * len(self.unknowns)
 
     def get_texture(self, texture_type: int):
         return None
@@ -949,15 +982,24 @@ class TerrainTileMaterial:
         return None
 
     @staticmethod
-    def parse(buf: bytes, offset: int) -> "TerrainTileMaterial":
-        vals = _TERRAIN_TILE_MATERIAL.unpack_from(buf, offset)
+    def parse(buf: bytes, offset: int, size: int = _TERRAIN_TILE_MATERIAL.size,
+              version: int = 6) -> "TerrainTileMaterial":
+        width = _terrain_name_width(version)
+        raw = bytes(buf[offset:offset + width])
+        count = (size - width) // 4
         return TerrainTileMaterial(
-            name_raw=vals[0],
-            model_name=_decode_fixed_string(vals[0]) or "TerrainTile",
-            unknowns=tuple(vals[1:7]))
+            name_raw=raw,
+            model_name=_decode_name(raw, _wide_strings(version))
+            or "TerrainTile",
+            unknowns=struct.unpack_from("<%dI" % count, buf, offset + width))
 
     def write(self, version: int = 6) -> bytes:
-        return _TERRAIN_TILE_MATERIAL.pack(self.name_raw, *self.unknowns)
+        width = _terrain_name_width(version)
+        raw = self.name_raw
+        if len(raw) != width or _decode_name(raw, _wide_strings(version)) \
+                != self.model_name:
+            raw = _encode_name(self.model_name, 64, _wide_strings(version))
+        return raw + struct.pack("<%dI" % len(self.unknowns), *self.unknowns)
 
 
 @dataclass
@@ -1005,6 +1047,119 @@ class CustomTerrainMaterial:
             return self.path_raw
         return _CUSTOM_TERRAIN_MATERIAL.pack(
             _encode_fixed_string(self.texture_path, 256))
+
+
+@dataclass
+class DecalMaterial:
+    """The projected-decal family: a texture path and a short block of
+    floats.
+
+    Four ids ship it, and the block grows with each: 67
+    (projected_decal) has one word, 87 (projected_decal_v2) nine - two
+    vec3 that read as the decal's placement and extent, plus three
+    zeros - and 95 (projected_decal_v3) ten, the last of them an angle
+    (pi/2 in the file that named it).  Warhammer 3's decals use id 100
+    and have none at all, just the path.  Their meaning is a guess;
+    their layout is not.
+    """
+    material_id: int = 67
+    vertex_format: int = VF_POSITION16
+    texture_path: str = ""
+    path_raw: bytes = b""
+    values: tuple = ()
+
+    # Interface parity with WeightedMaterial ------------------------------
+    model_name: str = ""
+    pivot: tuple = (0.0, 0.0, 0.0)
+    attachment_points: list = field(default_factory=list)
+    string_params: list = field(default_factory=list)
+    float_params: list = field(default_factory=list)
+    int_params: list = field(default_factory=list)
+    vec4_params: list = field(default_factory=list)
+    filters: str = ""
+    matrix_index: int = -1
+    parent_matrix_index: int = -1
+
+    @property
+    def texture_directory(self) -> str:
+        return self.texture_path
+
+    @property
+    def textures(self) -> list:
+        """The path is the decal's diffuse, so report it as one."""
+        return ([(TEXTURE_TYPE_DIFFUSE, self.texture_path)]
+                if self.texture_path else [])
+
+    def compute_size(self, version: int = 6) -> int:
+        return _decal_path_width(version) + 4 * len(self.values)
+
+    def get_texture(self, texture_type: int):
+        if texture_type == TEXTURE_TYPE_DIFFUSE:
+            return self.texture_path or None
+        return None
+
+    def get_int_param(self, index: int):
+        return None
+
+    @staticmethod
+    def parse(buf: bytes, offset: int, material_id: int, size: int,
+              version: int = 6) -> "DecalMaterial":
+        width = _decal_path_width(version)
+        raw = bytes(buf[offset:offset + width])
+        count = (size - width) // 4
+        return DecalMaterial(
+            material_id=material_id,
+            texture_path=_decode_name(raw, _wide_strings(version)),
+            path_raw=raw,
+            values=struct.unpack_from("<%df" % count, buf, offset + width))
+
+    def write(self, version: int = 6) -> bytes:
+        width = _decal_path_width(version)
+        raw = self.path_raw
+        if len(raw) != width or _decode_name(raw, _wide_strings(version)) \
+                != self.texture_path:
+            raw = _encode_name(self.texture_path, 256, _wide_strings(version))
+        return raw + struct.pack("<%df" % len(self.values), *self.values)
+
+
+@dataclass
+class EmptyMaterial:
+    """Some materials have no header at all - the mesh section goes
+    straight from the common header to the vertices.
+
+    Bow waves and one of the terrain-tile ids do this in the Rome 2 era,
+    and Rome 2's debug geometry too.  With no header there is no vertex
+    format field either, so the layout has to come from the stride (see
+    _load_model).
+    """
+    material_id: int = 0
+    vertex_format: int = -1
+
+    # Interface parity with WeightedMaterial ------------------------------
+    model_name: str = ""
+    texture_directory: str = ""
+    filters: str = ""
+    pivot: tuple = (0.0, 0.0, 0.0)
+    textures: list = field(default_factory=list)
+    attachment_points: list = field(default_factory=list)
+    string_params: list = field(default_factory=list)
+    float_params: list = field(default_factory=list)
+    int_params: list = field(default_factory=list)
+    vec4_params: list = field(default_factory=list)
+    matrix_index: int = -1
+    parent_matrix_index: int = -1
+
+    def compute_size(self, version: int = 6) -> int:
+        return 0
+
+    def get_texture(self, texture_type: int):
+        return None
+
+    def get_int_param(self, index: int):
+        return None
+
+    def write(self, version: int = 6) -> bytes:
+        return b""
 
 
 @dataclass
@@ -1186,17 +1341,52 @@ class Shogun2Material:
         return bytes(out)
 
 
+# Material ids are not stable across the series: Rome 2 and Attila call
+# the terrain-tile material 66 or 96 where Warhammer calls it 101, and
+# the decal family grew from 67 to 87 to 95.  What is stable is that
+# each of those layouts has a size that follows from its own fields, so
+# the header size decides between them and the id only picks the family.
+_TERRAIN_TILE_IDS = (MAT_TERRAIN_TILES, 66, 96, 97)
+_DECAL_IDS = (67, 87, 95, 100)
+
+# Cloth, weighted cloth, rope and collision shapes are an ordinary
+# weighted material followed by a block of their own: for cloth and rope
+# a simulation graph (a count, then triples of two vertex indices and a
+# rest length, then more), for a collision shape twenty bytes.  Neither is decoded -
+# nothing in Blender could rebuild them - so the block is kept as it was
+# read and written back with the material it belongs to.  The allowance
+# is deliberately limited to these ids: anywhere else, a material that
+# does not consume its declared size is a parse error and should stay
+# one.
+_TRAILING_BLOCK_IDS = (58, 60, 62, 93)
+
+
 def _parse_material(buf: bytes, offset: int, material_id: int,
                     expected_size: int, version: int = 6):
-    """Dispatch like MaterialFactory: terrain ids get their own headers,
-    everything else uses the weighted material layout."""
-    if material_id == MAT_TERRAIN_TILES:
-        mat = TerrainTileMaterial.parse(buf, offset)
+    """Dispatch like MaterialFactory: terrain and decal ids get their own
+    headers, everything else uses the weighted material layout."""
+    if expected_size == 0:
+        mat = EmptyMaterial(material_id=material_id)
+    elif (material_id in _TERRAIN_TILE_IDS
+            and expected_size in (_terrain_name_width(version) + 4 * n
+                                  for n in (5, 6))):
+        mat = TerrainTileMaterial.parse(buf, offset, expected_size, version)
+        mat.material_id = material_id
     elif material_id == MAT_CUSTOM_TERRAIN:
         mat = CustomTerrainMaterial.parse(buf, offset)
+    elif (material_id in _DECAL_IDS
+            and expected_size >= _decal_path_width(version)
+            and (expected_size - _decal_path_width(version)) % 4 == 0
+            and expected_size - _decal_path_width(version) <= 64):
+        mat = DecalMaterial.parse(buf, offset, material_id, expected_size,
+                                  version)
     else:
         mat = WeightedMaterial.parse(buf, offset, version)
         mat.material_id = material_id
+        if material_id in _TRAILING_BLOCK_IDS:
+            used = mat.compute_size(version)      # no trailing block yet
+            if 0 < expected_size - used:
+                mat.trailing = bytes(buf[offset + used:offset + expected_size])
     actual = mat.compute_size(version)
     if actual != expected_size:
         raise RmvFormatError(
@@ -1225,6 +1415,12 @@ class RmvModel:
     shader_raw: bytes = b""
     shader_extra: bytes = b"\0" * 10   # "UnknownValues" in the C# reference
     shader_zero: bytes = b"\0" * 10
+    # A few mesh sections are longer than their own header says they need:
+    # Attila's ropes follow the index block with a list of u16 that is
+    # plainly more indices, but not in any layout described here.  The
+    # section size is authoritative, so whatever is past the indices is
+    # kept and written back with the mesh.
+    section_tail: bytes = b""
     # None means "compute from the mesh on save"; loading fills these in so
     # unmodified files keep their original values.
     bbox_min: Optional[tuple] = None
@@ -1312,7 +1508,19 @@ def _lod_header_struct(version: int):
 # The pair (declared format, stride) says which layout it really is, where
 # a blind search by stride could not: three different 28-byte layouts are
 # in use, and Rome 2 declares two of them under ids of its own.
+# For meshes whose material carries no vertex format field at all.
+_FORMAT_BY_STRIDE = {
+    8: VF_POSITION_HALF,
+    12: VF_POSITION_UV,
+    16: VF_POSITION16,
+    24: VF_S2_BOW_WAVE,
+    32: VF_STATIC,
+    36: VF_CUSTOM_TERRAIN,
+    60: VF_VEGETATION,
+}
+
 _FORMAT_BY_DECLARED_STRIDE = {
+    (VF_POSITION16, 8): VF_POSITION_HALF,
     (VF_POSITION16, 28): VF_GRASS,
     (VF_CUSTOM_TERRAIN, 60): VF_VEGETATION,
     (VF_ROME2_TREE, 12): VF_POSITION_UV,
@@ -1334,8 +1542,13 @@ def _load_model(buf: bytes, offset: int, version: int) -> tuple[RmvModel, int]:
     material = _parse_material(buf, material_offset, model_type,
                                expected_material_size, version)
 
-    if vertex_count > 0:
-        stride = (index_offset - vertex_offset) // vertex_count
+    # Warhammer 3's decals, like Shogun 2's non-renderable meshes, declare
+    # a vertex count and then ship no vertex block at all - the game
+    # builds the geometry itself.  The count is kept so the file re-saves
+    # as it was read (see RmvModel.written_vertex_count).
+    vertex_bytes = index_offset - vertex_offset
+    if vertex_count > 0 and vertex_bytes > 0:
+        stride = vertex_bytes // vertex_count
         fmt = material.vertex_format
         try:
             expected_stride = vertex_stride(fmt, version)
@@ -1347,6 +1560,9 @@ def _load_model(buf: bytes, offset: int, version: int) -> tuple[RmvModel, int]:
             # actual stride (e.g. the v8 colour variants, or CustomTerrain
             # vs CustomTerrain2).
             resolved = _FORMAT_BY_DECLARED_STRIDE.get((fmt, stride))
+            if resolved is None and isinstance(material, EmptyMaterial):
+                # Nothing declared a format, so the stride is all there is.
+                resolved = _FORMAT_BY_STRIDE.get(stride)
             for candidate in (VF_STATIC, VF_WEIGHTED, VF_CINEMATIC,
                               VF_COLLISION, VF_POSITION16,
                               VF_CUSTOM_TERRAIN, VF_CUSTOM_TERRAIN2):
@@ -1375,6 +1591,10 @@ def _load_model(buf: bytes, offset: int, version: int) -> tuple[RmvModel, int]:
     mesh.indices = np.frombuffer(
         buf, dtype="<u2", count=usable, offset=offset + index_offset).copy()
 
+    consumed = index_offset + index_count * 2
+    tail = (bytes(buf[offset + consumed:offset + mesh_section_size])
+            if mesh_section_size > consumed else b"")
+
     model = RmvModel(
         material=material,
         mesh=mesh,
@@ -1385,6 +1605,9 @@ def _load_model(buf: bytes, offset: int, version: int) -> tuple[RmvModel, int]:
         shader_zero=shader_zero,
         bbox_min=tuple(bbox[0:3]),
         bbox_max=tuple(bbox[3:6]),
+        section_tail=tail,
+        declared_vertex_count=(vertex_count if not mesh.vertex_count
+                               else None),
     )
     return model, mesh_section_size
 
@@ -1540,10 +1763,23 @@ def load(data: bytes) -> RmvFile:
             padding=header.get("padding", (0, 0, 0)),
         )
         offset = header["first_mesh_offset"]
+        actual_vertex = actual_index = 0
         for _ in range(header["mesh_count"]):
             model, section_size = _load_model(data, offset, version)
             lod.models.append(model)
             offset += section_size
+            # From the bytes read, not from the format: a mesh whose
+            # layout this module cannot name still occupies its block.
+            # A section tail is not vertex data and is not counted.
+            raw = model.mesh.raw_block
+            actual_vertex += 0 if raw is None else len(raw)
+            actual_index += len(model.mesh.indices) * 2
+        # Bow waves declare zero for both totals, whatever they hold, so
+        # a value that disagrees with the meshes is kept rather than
+        # recomputed - the same rule the Shogun 2 path uses.
+        declared = (header["total_vertex_size"], header["total_index_size"])
+        if declared != (actual_vertex, actual_index):
+            lod.declared_sizes = declared
         rmv.lods.append(lod)
 
     return rmv
@@ -1671,6 +1907,8 @@ def save(rmv: RmvFile, high_precision: bool = True,
     for lod, entries in zip(rmv.lods, encoded):
         total_vertex = sum(len(e[2]) for e in entries)
         total_index = sum(len(e[3]) for e in entries)
+        if lod.declared_sizes is not None:
+            total_vertex, total_index = lod.declared_sizes
         if version <= 6:
             out += lod_struct.pack(len(entries), total_vertex, total_index,
                                    running, lod.camera_distance)
@@ -1681,8 +1919,8 @@ def save(rmv: RmvFile, high_precision: bool = True,
                                    lod.lod_level, lod.quality_level & 0xFF,
                                    pad[0] & 0xFF, pad[1] & 0xFF, pad[2] & 0xFF)
         for model, material_blob, vertex_blob, index_blob in entries:
-            running += (common.size + len(material_blob)
-                        + len(vertex_blob) + len(index_blob))
+            running += (common.size + len(material_blob) + len(vertex_blob)
+                        + len(index_blob) + len(model.section_tail))
 
     # Mesh sections.
     pad_width = 20 if wide else 10
@@ -1690,7 +1928,8 @@ def save(rmv: RmvFile, high_precision: bool = True,
         for model, material_blob, vertex_blob, index_blob in entries:
             vertex_offset = common.size + len(material_blob)
             index_offset = vertex_offset + len(vertex_blob)
-            section_size = index_offset + len(index_blob)
+            section_size = (index_offset + len(index_blob)
+                            + len(model.section_tail))
 
             shader = _encode_name(model.shader_name, 12, wide)
             if (len(model.shader_raw) == len(shader)
@@ -1707,7 +1946,7 @@ def save(rmv: RmvFile, high_precision: bool = True,
                 model.render_flag & 0xFFFF,
                 section_size,
                 vertex_offset,
-                model.mesh.vertex_count,
+                model.written_vertex_count,
                 index_offset,
                 len(model.mesh.indices),
                 *[float(v) for v in bbox_min],
@@ -1716,6 +1955,7 @@ def save(rmv: RmvFile, high_precision: bool = True,
             out += material_blob
             out += vertex_blob
             out += index_blob
+            out += model.section_tail
 
     blob = bytes(out)
     if verify:

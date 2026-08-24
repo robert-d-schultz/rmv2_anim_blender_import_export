@@ -511,6 +511,226 @@ class TestFixedFieldJunk(unittest.TestCase):
         self.assertEqual(again.write(), bytes(blob))
 
 
+class TestDecalMaterial(unittest.TestCase):
+    """The projected-decal family: a texture path and a short float block
+    whose length is the version of the decal."""
+
+    PATH = "rigidmodels/campaign/textures/quarry_underlay"
+
+    def build(self, material_id=87, values=(0.0, 0.0, 0.0, 2.29, 2.29,
+                                            2.29, 0.0, 0.0, 0.0)):
+        return rf.DecalMaterial(material_id=material_id,
+                                texture_path=self.PATH, values=values)
+
+    def test_sizes(self):
+        self.assertEqual(self.build(67, (0.0,)).compute_size(6), 260)
+        self.assertEqual(self.build().compute_size(6), 292)
+        self.assertEqual(self.build(95, (0.0,) * 10).compute_size(6), 296)
+        # v5 doubles the path, not the numbers
+        self.assertEqual(self.build(67, (0.0,)).compute_size(5), 516)
+
+    def test_roundtrip(self):
+        for version in (5, 6):
+            with self.subTest(version=version):
+                mat = self.build()
+                blob = mat.write(version)
+                self.assertEqual(len(blob), mat.compute_size(version))
+                again = rf.DecalMaterial.parse(blob, 0, 87, len(blob),
+                                               version)
+                self.assertEqual(again.texture_path, self.PATH)
+                np.testing.assert_allclose(again.values, mat.values,
+                                           atol=1e-6)
+                self.assertEqual(again.write(version), blob)
+
+    def test_the_path_is_reported_as_a_diffuse_texture(self):
+        mat = self.build()
+        self.assertEqual(mat.textures,
+                         [(rf.TEXTURE_TYPE_DIFFUSE, self.PATH)])
+        self.assertEqual(mat.get_texture(rf.TEXTURE_TYPE_DIFFUSE), self.PATH)
+        self.assertIsNone(mat.get_texture(rf.TEXTURE_TYPE_NORMAL))
+
+    def test_in_a_whole_file(self):
+        rmv = make_file(version=6, vertex_format=rf.VF_STATIC, lods=1)
+        for model in rmv.lods[0].models:
+            model.material = self.build()
+            model.material.vertex_format = rf.VF_STATIC
+        blob = rf.save(rmv)
+        out = rf.load(blob)
+        self.assertIsInstance(out.lods[0].models[0].material, rf.DecalMaterial)
+        self.assertEqual(out.lods[0].models[0].material.texture_path,
+                         self.PATH)
+        self.assertEqual(rf.save(out), blob)
+
+
+class TestTerrainTileMaterial(unittest.TestCase):
+    """Warhammer's terrain tile carries six trailing u32; Rome 2 and
+    Attila ship one with five and one with six, under ids of their own."""
+
+    def test_five_and_six_word_variants(self):
+        for count in (5, 6):
+            with self.subTest(words=count):
+                mat = rf.TerrainTileMaterial(
+                    model_name="TerrainBase0",
+                    name_raw=rf._encode_fixed_string("TerrainBase0", 64),
+                    unknowns=tuple(range(count)))
+                blob = mat.write(6)
+                self.assertEqual(len(blob), 64 + 4 * count)
+                again = rf.TerrainTileMaterial.parse(blob, 0, len(blob), 6)
+                self.assertEqual(again.model_name, "TerrainBase0")
+                self.assertEqual(again.unknowns, tuple(range(count)))
+                self.assertEqual(again.write(6), blob)
+
+    def test_v5_doubles_the_name(self):
+        mat = rf.TerrainTileMaterial(model_name="TerrainBase0",
+                                     unknowns=(1, 2, 3, 4, 5))
+        blob = mat.write(5)
+        self.assertEqual(len(blob), 128 + 20)
+        self.assertIn("TerrainBase0".encode("utf-16-le"), blob)
+        again = rf.TerrainTileMaterial.parse(blob, 0, len(blob), 5)
+        self.assertEqual(again.model_name, "TerrainBase0")
+        self.assertEqual(again.unknowns, (1, 2, 3, 4, 5))
+
+
+class TestEmptyMaterial(unittest.TestCase):
+    """Bow waves and one terrain-tile id have no material header at all,
+    so the vertex layout has to come from the stride."""
+
+    def test_roundtrip_through_a_file(self):
+        rmv = make_file(version=6, vertex_format=rf.VF_STATIC, lods=1)
+        for model in rmv.lods[0].models:
+            model.material = rf.EmptyMaterial(material_id=22)
+            model.material.vertex_format = rf.VF_STATIC
+        blob = rf.save(rmv)
+        out = rf.load(blob)
+        mat = out.lods[0].models[0].material
+        self.assertIsInstance(mat, rf.EmptyMaterial)
+        self.assertEqual(mat.material_id, 22)
+        # resolved from the 32-byte stride, with nothing declaring it
+        self.assertEqual(mat.vertex_format, rf.VF_STATIC)
+        self.assertEqual(rf.save(out), blob)
+
+    def test_it_writes_nothing(self):
+        self.assertEqual(rf.EmptyMaterial().write(6), b"")
+        self.assertEqual(rf.EmptyMaterial().compute_size(6), 0)
+
+
+class TestKeptBlocks(unittest.TestCase):
+    """Two blocks are kept exactly as read because nothing here could
+    rebuild them: the cloth/rope simulation data inside those materials,
+    and the extra indices some sections carry after their index block."""
+
+    def test_cloth_trailing_block(self):
+        rmv = make_file(version=6, vertex_format=rf.VF_STATIC, lods=1)
+        for model in rmv.lods[0].models:
+            model.material.material_id = 60          # cloth
+            model.material.trailing = bytes(range(40))
+        blob = rf.save(rmv)
+        out = rf.load(blob)
+        self.assertEqual(out.lods[0].models[0].material.trailing,
+                         bytes(range(40)))
+        self.assertEqual(rf.save(out), blob)
+
+    def test_a_trailing_block_is_only_allowed_for_those_ids(self):
+        """Anywhere else, a material that does not consume its declared
+        size is a parse error and stays one."""
+        rmv = make_file(version=6, vertex_format=rf.VF_STATIC, lods=1)
+        for model in rmv.lods[0].models:
+            model.material.material_id = rf.MAT_DEFAULT
+            model.material.trailing = bytes(range(40))
+        with self.assertRaises(rf.RmvFormatError):
+            rf.save(rmv)
+
+    def test_section_tail(self):
+        rmv = make_file(version=6, vertex_format=rf.VF_STATIC, lods=1)
+        tail = bytes(range(24))
+        for model in rmv.lods[0].models:
+            model.section_tail = tail
+        blob = rf.save(rmv)
+        out = rf.load(blob)
+        self.assertEqual(out.lods[0].models[0].section_tail, tail)
+        self.assertEqual(rf.save(out), blob)
+
+    def test_a_section_tail_is_not_counted_as_vertex_data(self):
+        """The LOD header's totals cover the vertex and index blocks, so
+        a tail must not push them up - otherwise every file with one
+        would come back with declared_sizes set."""
+        rmv = make_file(version=6, vertex_format=rf.VF_STATIC, lods=1)
+        for model in rmv.lods[0].models:
+            model.section_tail = bytes(range(24))
+        out = rf.load(rf.save(rmv))
+        self.assertIsNone(out.lods[0].declared_sizes)
+
+
+class TestDeclaredVertexCount(unittest.TestCase):
+    """Warhammer 3's decals declare a vertex count and then ship no
+    vertex block - the game builds the geometry itself.  Shogun 2's
+    non-renderable meshes have always done this; the modern path had to
+    learn it too."""
+
+    def make(self):
+        """A v8 file whose only mesh has vertices, with the vertex block
+        cut out and the count left alone."""
+        rmv = make_file(version=8, vertex_format=rf.VF_STATIC, lods=1)
+        del rmv.lods[0].models[1:]
+        model = rmv.lods[0].models[0]
+        count = model.mesh.vertex_count
+        blob = bytearray(rf.save(rmv))
+        at = 140 + rf._LOD_HEADER_V7_V8.size
+        common = rf._COMMON_HEADER.unpack_from(blob, at)
+        vertex_offset, index_offset = common[3], common[5]
+        block = index_offset - vertex_offset
+        del blob[at + vertex_offset:at + index_offset]
+        rf._COMMON_HEADER.pack_into(
+            blob, at, common[0], common[1], common[2] - block, vertex_offset,
+            count, vertex_offset, common[6], *common[7:13],
+            common[13], common[14], common[15])
+        struct.pack_into("<I", blob, 144, 0)          # no vertex bytes
+        return bytes(blob), count
+
+    def test_the_count_survives(self):
+        blob, count = self.make()
+        out = rf.load(blob)
+        model = out.lods[0].models[0]
+        self.assertEqual(model.mesh.vertex_count, 0)
+        self.assertEqual(model.declared_vertex_count, count)
+        self.assertEqual(model.written_vertex_count, count)
+        self.assertEqual(rf.save(out), blob)
+
+
+class TestDeclaredLodSizes(unittest.TestCase):
+    """Attila's bow waves declare zero vertex and index bytes whatever
+    they hold; the values are kept rather than recomputed."""
+
+    def test_kept(self):
+        rmv = make_file(version=6, vertex_format=rf.VF_STATIC, lods=1)
+        blob = bytearray(rf.save(rmv))
+        struct.pack_into("<II", blob, 144, 0, 0)     # both totals to zero
+        out = rf.load(bytes(blob))
+        self.assertEqual(out.lods[0].declared_sizes, (0, 0))
+        self.assertEqual(rf.save(out), bytes(blob))
+
+    def test_absent_when_they_agree(self):
+        out = rf.load(rf.save(make_file(version=6,
+                                        vertex_format=rf.VF_STATIC, lods=1)))
+        self.assertIsNone(out.lods[0].declared_sizes)
+
+
+class TestZeroVertexMesh(unittest.TestCase):
+    """Rope and light meshes declare a vertex format and ship no
+    vertices - including formats that have no layout here."""
+
+    def test_an_unknown_format_with_no_vertices_still_writes(self):
+        rmv = make_file(version=6, vertex_format=rf.VF_STATIC, lods=1)
+        for model in rmv.lods[0].models:
+            model.mesh = rf.RmvMeshData.empty(0, 0)
+            model.material.vertex_format = 11        # Attila's ropes
+        blob = rf.save(rmv)
+        out = rf.load(blob)
+        self.assertEqual(out.lods[0].models[0].mesh.vertex_count, 0)
+        self.assertEqual(out.lods[0].models[0].material.vertex_format, 11)
+        self.assertEqual(rf.save(out), blob)
+
+
 class TestAnimRoundtrip(unittest.TestCase):
     def check(self, version, **kwargs):
         anim = make_anim(version=version, **kwargs)

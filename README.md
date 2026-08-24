@@ -48,9 +48,10 @@ the export says what it dropped rather than refusing.
 **Per mesh** you get positions, custom split normals, the full tangent
 basis, both UV channels, vertex colours and bone weights. *Static*,
 *Weighted* (2 bone influences) and *Cinematic* (4) are read and written;
-collision, `Position16`, the two custom-terrain layouts and the four
-vegetation layouts (trees, their billboards, grass, and the plain
-position-and-uv one water planes use) are import-only.
+collision, `Position16`, the two custom-terrain layouts and the five
+added for Rome 2 and Attila (trees, their billboards, grass, the plain
+position-and-uv one water planes use, and the position-only one under a
+terrain tile) are import-only.
 
 **Round-trip fidelity.** Re-saving an unmodified file byte-for-byte is a
 tested invariant, checked against every file the games ship:
@@ -67,7 +68,10 @@ tested invariant, checked against every file the games ship:
 | Warhammer 3 `.anim` v5–v7 | 8368 / 8368 |
 | Warhammer 3 `.anim` v8 | 6651 / 6651 sampled |
 | Rome 2 `.anim` | 6012 / 6012 — every one, v4 and v5 |
-| Rome 2 `.rigid_model_v2` | 10 815 / 14 673 — v3 whole, the rest limited by materials this add-on has not decoded |
+| Rome 2 `.rigid_model_v2` | 14 452 / 14 673 |
+| Attila `.anim` | 6225 / 6225 |
+| Attila `.rigid_model_v2` | 9971 / 10 015 |
+| Warhammer 3 `.rigid_model_v2` | 2664 / 2755 sampled 1 in 8 (was 2502 before the material work) |
 
 Version 8 nearly did not make that bar, and the reason is worth knowing.
 Its byte-packed channels decode as `base + (byte / 127) × scale`, and
@@ -101,10 +105,36 @@ with two per-bone bitfields where v5 keeps its mapping tables. And v3,
 the version Rome 2's 3D interface models use, is not a Rome 2 layout at
 all — it is Shogun 2's, carried forward one release.
 
-What still does not read is a group of materials with short fixed
-headers of their own — decals, terrain tiles, bow waves, point lights,
-cloth — which Rome 2's terrain and campaign packs are full of. They are
-the same class of gap Warhammer 3 has, just far more numerous here.
+Attila is the same game format-wise, down to shipping Rome 2's
+animation files unchanged, so what it was good for was **materials**.
+Every era has a set of them with short fixed headers of their own, and
+until now anything that was not the weighted, custom-terrain or
+terrain-tile material was read with the weighted layout and ran off the
+end of a much shorter header. Now decoded:
+
+- **Terrain tiles**, whose id is 66 or 97 here and 101 in Warhammer, and
+  which carry five trailing words or six depending on which.
+- **The projected-decal family** — 67, then 87, then 95 — a texture path
+  followed by one, nine or ten floats.
+- **Materials with no header at all**: bow waves and one of the
+  terrain-tile ids go straight from the common header to the vertices,
+  so the vertex layout has to come from the stride.
+- **Cloth, rope and collision shapes**, which are an ordinary weighted
+  material followed by a block of their own. That block is simulation
+  data — constraint pairs and rest lengths — and nothing in Blender
+  could rebuild it, so it is kept exactly as read and written back with
+  the material. The same goes for the extra indices Attila's ropes put
+  after their index block.
+
+The same work moved Warhammer 3, which shares most of those materials:
+its unreadable meshes dropped from 253 to 91 in a 1-in-8 sample, and
+what is left there is almost entirely `tree_billboard_material`.
+
+What is left is a long tail: banner materials, point lights, a few
+statues and Attila's night lights, 44 files in Attila and 221 in Rome 2.
+Their headers are all "a name or path, then a run of words", but every
+vanilla example has those words at zero, so there is nothing to check a
+guess against.
 
 That is **every** Empire and Napoleon file of every supported format,
 with one exclusion: Empire's 224 **Elite Units DLC**
