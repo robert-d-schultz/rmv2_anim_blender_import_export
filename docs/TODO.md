@@ -1,9 +1,9 @@
 # Where this stands, and what's left
 
-Written 2026-08-24, after version 1.18.0 (Warhammer and Warhammer 3
-both read completely, every format version writes, and every vertex
-layout the add-on reads it can also write). Roughly in priority order
-within each group.
+Written 2026-08-24, after version 1.18.0 (Warhammer, Warhammer 3 and
+Pharaoh Dynasties all read completely, every format version writes, and
+every vertex layout the add-on reads it can also write). Roughly in
+priority order within each group.
 
 ## Needs a human
 
@@ -59,6 +59,8 @@ version 1.11.0 has gone:
     8400791  Warhammer - the sway vertex and the banner material (1.17.0)
     bcf992f  that commit named in this list
     1bb529f  the tree billboard, and Warhammer 3 complete   (1.18.0)
+    2a4c73a  that commit named in this list
+    <this>   Pharaoh Dynasties, which needed nothing
 
 Nothing on the branch is experimental - every commit ships with corpus
 sweeps and tests - but merging is your call, not this add-on's, and it
@@ -68,8 +70,8 @@ stays a branch until you make it. It fast-forwards:
     git push
 
 Worth doing before the next game, or the branch name outlives its
-meaning: it is called *pre-Rome 2* and now carries Rome 2, Attila and
-Warhammer.
+meaning: it is called *pre-Rome 2* and now carries Rome 2, Attila, both
+Warhammers, Warhammer 3 and Pharaoh.
 
 ## Investigations
 
@@ -120,27 +122,25 @@ answer most of this quickly.
 
 ## The rest of the series
 
-Rome 2, Attila and Warhammer are swept (B, C and E below), though the
-first two have since been uninstalled - only their samples remain.
-Warhammer 2 is an empty shell, Rome 2 is now down to a single mod pack,
-and Troy and Thrones of Britannia are not on disk at all, so those
-start with an install.
+Everything in the series has now been looked at except Troy and Thrones
+of Britannia (A and D below). Games come and go off this disk as each
+one is swept, so most of the entries below are histories rather than
+things that can be re-measured: only Warhammer 3 and Pharaoh Dynasties
+are still installed.
 
-### A. Troy and Pharaoh - forward from Warhammer 3
+### A. Troy - the last one not looked at
 
-The two newest, and the two most likely to have moved on:
+Pharaoh is done (G below), which leaves Troy. Expect nothing new: the
+several thousand Troy-era meshes Pharaoh carries are all RMV2 v7, so
+whatever Troy is, it is almost certainly not a version this add-on has
+not already read. The value is confirmation.
 
-- **Pharaoh ships PFH6 packs.** The corpus tooling handles PFH0 through
-  PFH5; 6 is unread. RPFM has `pfh6.rs` to work from. Expect the same
-  per-entry compression flag PFH5 uses - but note from F below how that
-  flag behaved the last time it was assumed to mean one thing.
-- Troy is the era the README already attributes RMV2 v8 to ("Warhammer
-  3 / Troy era"), which has never actually been checked against a Troy
-  file.
-- Both are worth a version and vertex-format census before anything
-  else: new `TextureType` values, new material types, and new vertex
-  layouts are exactly what a later game adds, and all three would show
-  up immediately in the survey that Three Kingdoms went through.
+Both of the guesses this entry used to make about Pharaoh were wrong,
+which is the reason to keep it cheap and census first:
+
+- It was going to ship **PFH6** packs. It ships PFH5, with two
+  assembly-kit `_.pack` files in PFH6 holding one XML each.
+- **RMV2 v8** was going to be its era. It has none.
 
 ### B. Rome 2 - done, and what it turned up
 
@@ -256,12 +256,13 @@ which was the whole reason to look: that version is now unseen across
 Empire, Napoleon, Shogun 2, Rome 2, Attila, both Warhammers and
 Warhammer 3.
 
-The sweep got through 25 684 files before the packs went away, and every
-one re-saved byte-identically: 16 143 animations and 9541 meshes, **no
-failures of any kind**.  The remaining ~8400 were never read - the
-uninstall deleted the packs underneath the run - so they are neither a
-pass nor a fail.  On the evidence this is a game with no surprises in
-it, but "no surprises in two thirds of it" is what was measured.
+The sweep got through 25 684 of the 34 114 files before the packs went
+away, and every one re-saved byte-identically: 16 143 animations and
+9541 meshes, **no failures of any kind**.  The remaining 8430 were never
+read - the uninstall deleted the packs underneath the run - so they are
+neither a pass nor a fail.  On the evidence this is a game with no
+surprises in it, but "no surprises in three quarters of it" is what was
+measured.
 
 Two things it did leave behind, both in the corpus tooling rather than
 the add-on:
@@ -279,10 +280,34 @@ the add-on:
   only compressed differently.
 - **The sweep script used to swallow that silently.** An entry that
   failed to extract hit a bare `except: continue`, so it vanished from
-  the totals rather than being reported - which is how ~8400 files went
+  the totals rather than being reported - which is how 8430 files went
   missing from a run that claimed no failures.  It now counts and names
   them.  Worth remembering before PFH6: a file this tooling cannot
   extract must never look like a file it read successfully.
+
+### G. Pharaoh Dynasties - done, and it needed nothing
+
+Swept 2026-08-24, the newest game here and the only one that read
+completely on the first attempt with no code written for it:
+**13 531 / 13 531 meshes** and **13 505 / 13 505 animations**.
+
+- **RMV2 v7**, with four v6. No v8 anywhere, including in the several
+  thousand Troy-era meshes it carries.
+- **`.anim` v7**, with 1230 v5 and exactly one v4 - which is Rome 2's
+  `camel_v2.anim`, byte for byte, eleven years on. Worth knowing before
+  assuming a game's oldest version tells you anything about its era.
+- **PFH5 packs**, not the PFH6 this project expected. Only two
+  assembly-kit `_.pack` files are PFH6 and they hold one XML each. PFH6
+  is handled now anyway: PFH5's header with a 280-byte subheader after
+  it, validated the way RPFM suggests - the file index has to end
+  exactly at the end of the file.
+
+The 59 meshes that do not read are the encrypted DLC in
+`data_special.pack` - 7.99 bits of entropy per byte, all 256 values
+present, and the same first bytes across files of different sizes, which
+is a fixed keystream over identical header plaintext. Excluded on the
+same grounds as Empire's Elite Units DLC; no attempt made to decrypt
+them, and none should be.
 
 ## Known gaps
 

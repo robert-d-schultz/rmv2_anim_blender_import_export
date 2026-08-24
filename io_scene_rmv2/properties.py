@@ -158,7 +158,7 @@ VERSION_ITEMS = [
      "AssetEditor reads this but will not write it"),
     ("6", "RMV2 v6", "Rome 2 / Attila era, and the bulk of Rome 2"),
     ("7", "RMV2 v7", "Warhammer 1 & 2 era"),
-    ("8", "RMV2 v8", "Warhammer 3 / Troy era (vertex colours). Two out of "
+    ("8", "RMV2 v8", "Warhammer 3 and Three Kingdoms (vertex colours). Two out of "
      "three Warhammer 3 meshes are this version"),
 ]
 

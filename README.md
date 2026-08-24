@@ -89,10 +89,12 @@ tested invariant, checked against every file the games ship:
 | Attila `.rigid_model_v2` | 9971 / 10 015 |
 | Warhammer `.anim` | 6975 / 6975 — every one |
 | Warhammer `.rigid_model_v2` | 9335 / 9335 — every one |
-| Warhammer 2 `.anim` | 16 143 / 16 143 — of the two thirds swept, see below |
+| Warhammer 2 `.anim` | 16 143 / 16 143 — of the three quarters swept, see below |
 | Warhammer 2 `.rigid_model_v2` | 9541 / 9541 — likewise |
 | Warhammer 3 `.anim` | 34 997 / 34 997 — every one, v5, v7 and v8 |
 | Warhammer 3 `.rigid_model_v2` | 22 230 / 22 230 — every one |
+| Pharaoh Dynasties `.anim` | 13 505 / 13 505 — every one, v4, v5 and v7 |
+| Pharaoh Dynasties `.rigid_model_v2` | 13 531 / 13 531 — every one that is not encrypted DLC |
 
 Version 8 nearly did not make that bar, and the reason is worth knowing.
 Its byte-packed channels decode as `base + (byte / 127) × scale`, and
@@ -167,10 +169,33 @@ be recomputed on save, only written back.
 With that, **Warhammer 3 is complete**: 22 230 of 22 230 meshes and
 34 997 of 34 997 animations, v8 included.
 
-**Warhammer 2** was installed long enough to be censused and two thirds
-swept before it came off the disk again. It holds no version this add-on
-did not already read — RMV2 v7 with 36 v6, `.anim` v7 with some v5 — and
-it is where `.anim` v7 starts. Of the 25 684 files the sweep reached,
+**Pharaoh Dynasties** is the newest game here and the only one that
+needed no work at all: every file it ships read and re-saved on the
+first attempt. **13 531 of 13 531 meshes and 13 505 of 13 505
+animations**, RMV2 v7 with four v6, `.anim` v7 with 1230 v5 — and one
+v4, which is Rome 2's `camel_v2.anim`, shipped byte for byte eleven
+years later.
+
+Two things it settles. Its packs are **PFH5**, not the PFH6 this project
+had been expecting from it; only two assembly-kit `_.pack` files are
+PFH6, and those hold one XML each. (PFH6 is read now regardless — it is
+PFH5's header with a 280-byte subheader after it.) And it has **no RMV2
+v8 anywhere**, including in the several thousand Troy-era meshes it
+carries, which are all v7. This add-on had been describing v8 as a
+"Warhammer 3 / Troy era" format on no evidence; on this evidence v8
+belongs to Warhammer 3 and Three Kingdoms, and Troy does not have it.
+
+The 59 meshes that do not read are not a format problem: they sit in
+`data_special.pack` with 7.99 bits of entropy per byte and every one of
+the 256 byte values present, which is to say they are encrypted DLC
+content. They are excluded for the same reason Empire's Elite Units DLC
+is, and no attempt was made to decrypt them.
+
+**Warhammer 2** was installed long enough to be censused in full and
+three quarters swept before it came off the disk again. It holds no
+version this add-on did not already read — RMV2 v7 with 36 v6, `.anim`
+v7 with some v5 — and it is where `.anim` v7 starts. Of the 25 684 of
+34 114 files the sweep reached,
 every one re-saved byte-identically with no failure of any kind; the
 rest were never read, because the uninstall took the packs out from
 under the run, so they are neither a pass nor a fail. It also settles a
