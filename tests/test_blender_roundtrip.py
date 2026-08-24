@@ -292,6 +292,102 @@ def vegetation_case(tmpdir):
               "decal material is the size it was")
 
 
+def sway_case(tmpdir):
+    """Warhammer's wind-sway prop and its interface banner.
+
+    The sway vertex needs no point attributes - everything it stores maps
+    onto an ordinary mesh field - but the mapping is unusual enough to be
+    worth holding to: the UV is split across the W of two half4s, and the
+    sway weight is the alpha of the vertex colour, which is the channel a
+    modder would actually want to paint.
+    """
+    print("\n=== Sway vertices and the banner material ===")
+    reset_scene()
+    src_path = os.path.join(tmpdir, "src_sway.rigid_model_v2")
+    dst_path = os.path.join(tmpdir, "dst_sway.rigid_model_v2")
+
+    rmv = rf.RmvFile(version=7, skeleton_name="")
+    lod = rf.RmvLod(camera_distance=100.0, lod_level=0)
+
+    sway = make_cube_mesh(0)
+    # A weight that climbs with height, which is what CA's files do.
+    height = np.asarray(sway.positions, np.float32)[:, 1]
+    span = height.max() - height.min() or 1.0
+    sway.colours = np.stack(
+        [np.ones_like(height)] * 3 + [(height - height.min()) / span],
+        axis=1).astype(np.float32)
+    sway_mat = rf.WeightedMaterial(material_id=97, vertex_format=rf.VF_SWAY,
+                                   model_name="sway_mesh")
+    lod.models.append(rf.RmvModel(material=sway_mat, mesh=sway))
+
+    banner = make_cube_mesh(0)
+    # The banner material declares no vertex format of its own; loading
+    # fills the field in from the stride, so a from-scratch one has to
+    # say which layout its 28-byte vertices are.
+    banner_mat = rf.NamedMaterial(material_id=30,
+                                  vertex_format=rf.VF_S2_STATIC_NO_UV2,
+                                  model_name="army_banner_strength_fill_lod1",
+                                  values=(0,) * 8)
+    lod.models.append(rf.RmvModel(material=banner_mat, mesh=banner))
+    rmv.lods.append(lod)
+
+    with open(src_path, "wb") as handle:
+        handle.write(rf.save(rmv))
+
+    root, stats = import_rmv2.import_file(bpy.context, src_path, {
+        "import_lods": "ALL", "build_materials": True, "texture_root": "",
+        "create_attach_empties": False, "global_scale": 1.0,
+    })
+    check(stats["meshes"] == 2, "sway prop and banner imported")
+    bpy.context.view_layer.update()
+    objects = {obj.rmv2.model_name: obj for obj in root.children[0].objects}
+    sway_obj = objects.get("sway_mesh")
+    banner_obj = objects.get("army_banner_strength_fill_lod1")
+
+    check(sway_obj is not None and sway_obj.rmv2.vertex_format == "SWAY",
+          "sway vertex format kept (%s)"
+          % (sway_obj and sway_obj.rmv2.vertex_format))
+    check(sway_obj is not None and len(sway_obj.data.color_attributes) == 1,
+          "the sway weight arrived as a colour attribute, not thrown away")
+    check(banner_obj is not None and "named" in banner_obj.rmv2.extra_json,
+          "banner material remembered on the object")
+
+    activate_collection(root.name)
+    stats, warnings = export_rmv2.export_file(bpy.context, dst_path, {
+        "source": "AUTO", "version": "7", "skeleton_name": "",
+        "apply_modifiers": True, "high_precision": True,
+        "write_attach_points": True, "global_scale": 1.0,
+    })
+    print("  export warnings:", warnings or "none")
+
+    with open(dst_path, "rb") as handle:
+        result = rf.load(handle.read())
+    sway_out = next((m for m in result.lods[0].models
+                     if m.mesh.raw_format == rf.VF_SWAY), None)
+    banner_out = next((m for m in result.lods[0].models
+                       if isinstance(m.material, rf.NamedMaterial)), None)
+
+    check(sway_out is not None, "exported as a sway mesh")
+    if sway_out is not None:
+        check(sway_out.material.declared_vertex_format == rf.VF_SWAY_DECLARED,
+              "the material still declares format 12, which is what the "
+              "game reads (%s)" % sway_out.material.declared_vertex_format)
+        alpha = np.asarray(sway_out.mesh.colours, np.float32)[:, 3]
+        y = np.asarray(sway_out.mesh.positions, np.float32)[:, 1]
+        # Blender may split vertices, so compare the relationship rather
+        # than the rows: the weight still rises with height.
+        check(np.corrcoef(alpha, y)[0, 1] > 0.9,
+              "the sway weight still tracks height (r=%.3f)"
+              % np.corrcoef(alpha, y)[0, 1])
+    check(banner_out is not None, "banner exported as a banner material")
+    if banner_out is not None:
+        check(banner_out.material.model_name
+              == "army_banner_strength_fill_lod1", "banner name kept")
+        check(banner_out.material.compute_size(7) == 288,
+              "banner material is the size it was (%d)"
+              % banner_out.material.compute_size(7))
+
+
 def roundtrip_case(tmpdir, version, vertex_format, label):
     print(f"\n=== Roundtrip {label} (v{version}) ===")
     reset_scene()
@@ -2811,6 +2907,7 @@ def main():
         # width - the whole export path has to agree about that.
         roundtrip_case(tmpdir, 5, rf.VF_WEIGHTED, "weighted_v5")
         vegetation_case(tmpdir)
+        sway_case(tmpdir)
         native_export_case(tmpdir)
         default_textures_case()
         auto_lod_case(tmpdir)

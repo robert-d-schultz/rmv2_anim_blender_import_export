@@ -96,6 +96,21 @@ VF_GRASS = 106            # stride 28
 # own textures, so there is nothing else to store.
 VF_POSITION_HALF = 107    # stride 8
 
+# Warhammer's wind-swayed props - hanging cloth, bone cages, leaf cards,
+# the canopy of a tree - declare vertex format 12, which nothing else in
+# the series uses and no reference names.  The layout is two half4s whose
+# W components carry the UV between them: position + U, then normal + V,
+# then a colour whose alpha is the sway weight.  Unlike every other half
+# position here the XYZ is not scaled by W, because W is the U
+# coordinate; adding the material's pivot reproduces the header's
+# bounding box exactly, which is how the reading was confirmed.
+VF_SWAY = 108             # stride 20
+
+# What such a mesh declares in the file.  Kept as a constant of its own
+# because 12 is not a layout this module can size on its own - only the
+# pairing with a stride of 20 identifies it.
+VF_SWAY_DECLARED = 12
+
 VERTEX_FORMAT_NAMES = {
     VF_STATIC: "Static",
     VF_COLLISION: "Collision",
@@ -112,6 +127,7 @@ VERTEX_FORMAT_NAMES = {
     VF_TREE_BILLBOARD: "TreeBillboard",
     VF_GRASS: "Grass",
     VF_POSITION_HALF: "PositionHalf",
+    VF_SWAY: "Sway",
     VF_ROME2_TREE: "Rome2_Tree",
     VF_ROME2_WATER: "Rome2_Water",
 }
@@ -291,6 +307,10 @@ def _encode_fixed_utf16(value: str, length: int) -> bytes:
 
 def _terrain_name_width(version: int) -> int:
     return 128 if _wide_strings(version) else 64
+
+
+def _named_name_width(version: int) -> int:
+    return 512 if _wide_strings(version) else 256
 
 
 def _decal_path_width(version: int) -> int:
@@ -564,12 +584,17 @@ def _vertex_dtype(vertex_format: int, version: int) -> np.dtype:
         # "pivot" is where the vertex sits when the branch is at rest -
         # zero on leaf cards, a small offset on trunks - and "wind" is
         # eight halves that are constant per mesh except for two: they
-        # read as per-vertex sway weights.  Neither has anywhere to live
-        # in RmvMeshData, so this layout is read-only.
+        # read as per-vertex sway weights.  Neither has a standard field
+        # to live in, so both ride in RmvMeshData.extras.
         fields = [("pivot", "<f2", (4,)), ("pos", "<f2", (4,)),
                   ("normal", "<f2", (4,)), ("tangent", "<f2", (4,)),
                   ("binormal", "<f2", (4,)), ("uv", "<f2", (2,)),
                   ("wind", "<f2", (8,))]
+    elif vertex_format == VF_SWAY:
+        # "u" and "v" are the W components of two half4s; see VF_SWAY.
+        fields = [("pos", "<f2", (3,)), ("u", "<f2"),
+                  ("normal", "<f2", (3,)), ("v", "<f2"),
+                  ("col", "u1", (4,))]
     elif vertex_format == VF_S2_BOW_WAVE:
         # The second position is where the wave crest travels to; it has
         # no equivalent in RmvMeshData and is preserved via raw_block.
@@ -584,6 +609,17 @@ def _vertex_dtype(vertex_format: int, version: int) -> np.dtype:
 
 def vertex_stride(vertex_format: int, version: int) -> int:
     return _vertex_dtype(vertex_format, version).itemsize
+
+
+def has_colour(vertex_format: int, version: int) -> bool:
+    """Whether this layout stores a per-vertex colour.  Asked of the
+    layout rather than listed by hand, so a new one is never forgotten -
+    the Shogun 2 static vertex and Warhammer's sway vertex both carry a
+    colour, and the sway one keeps its wind weight in the alpha."""
+    try:
+        return "col" in _vertex_dtype(vertex_format, version).names
+    except RmvFormatError:
+        return False
 
 
 def _weight_count(vertex_format: int) -> int:
@@ -682,6 +718,16 @@ def decode_vertices(buf: bytes, offset: int, count: int, stride: int,
         mesh.uv0 = raw["uv"].astype(np.float32)
         mesh.extras["pivot"] = raw["pivot"].astype(np.float32)
         mesh.extras["wind"] = raw["wind"].astype(np.float32)
+    elif vertex_format == VF_SWAY:
+        # No W scale on the position and no swap on the normal: both were
+        # checked against the geometry, the normal by comparing it with
+        # the face normals of the triangles that use it.
+        mesh.positions = np.asarray(raw["pos"], np.float32).copy()
+        mesh.normals = np.asarray(raw["normal"], np.float32).copy()
+        mesh.uv0 = np.stack([raw["u"], raw["v"]], axis=1).astype(np.float32)
+        # Byte 19 is the sway weight - it tracks height up the mesh in
+        # 95% of vanilla files - and rides in the colour's alpha.
+        mesh.colours = raw["col"].astype(np.float32) / 255.0
     elif vertex_format in (VF_CUSTOM_TERRAIN, VF_CUSTOM_TERRAIN2):
         mesh.positions = _decode_position_float(raw["pos"])
         mesh.normals = _decode_position_float(raw["normal"])
@@ -856,6 +902,15 @@ def encode_vertices(mesh: RmvMeshData, vertex_format: int, version: int,
             for name in ("col1", "col2"):
                 raw[name] = np.clip(
                     np.round(_extra(mesh, name, 4)), 0, 255).astype(np.uint8)
+        return raw.tobytes()
+
+    if vertex_format == VF_SWAY:
+        raw["pos"] = np.asarray(mesh.positions, np.float32)
+        raw["normal"] = np.asarray(mesh.normals, np.float32)
+        uv = np.asarray(mesh.uv0, np.float32)
+        raw["u"], raw["v"] = uv[:, 0], uv[:, 1]
+        raw["col"] = np.clip(
+            np.round(mesh.colours * 255.0), 0, 255).astype(np.uint8)
         return raw.tobytes()
 
     if vertex_format in (VF_COLLISION, VF_POSITION16):
@@ -1041,8 +1096,9 @@ class WeightedMaterial:
         pad = self.padding124
         if len(pad) != 124:
             pad = (bytes(pad) + b"\0" * 124)[:124]
-        declared = (self.vertex_format if self.declared_vertex_format is None
-                    else self.declared_vertex_format)
+        declared = self.declared_vertex_format
+        if declared is None:
+            declared = declared_format_id(self.vertex_format)
         header = _weighted_material_struct(version).pack(
             declared & 0xFFFF,
             _encode_name(self.model_name, 32, wide),
@@ -1256,6 +1312,74 @@ class DecalMaterial:
                 != self.texture_path:
             raw = _encode_name(self.texture_path, 256, _wide_strings(version))
         return raw + struct.pack("<%df" % len(self.values), *self.values)
+
+
+@dataclass
+class NamedMaterial:
+    """A short header that is a model name and then a run of words.
+
+    The 3D interface banners (ids 29 and 30) ship 288 bytes: a 256-byte
+    name - "army_banner_strength_fill_lod1", one per faction - and eight
+    words, zero in all 19 of Warhammer's and in the Rome 2 and Attila
+    ones surveyed before those games left the disk.  The words are read
+    as words and written back as they were read, so the day a file turns
+    up with one set, it survives the round trip whether or not anyone has
+    worked out what it means.
+
+    There is no vertex-format field, so the layout comes from the stride
+    (see _load_model); the banners are all 28-byte Shogun2_Static.
+
+    The v5 width below follows the rule the terrain and decal materials
+    set - fixed strings double for the UTF-16 versions - but no v5 file
+    with this material has been seen, so that half is convention rather
+    than evidence.
+    """
+    material_id: int = 29
+    vertex_format: int = -1
+    model_name: str = ""
+    name_raw: bytes = b""
+    values: tuple = ()
+
+    # Interface parity with WeightedMaterial ------------------------------
+    pivot: tuple = (0.0, 0.0, 0.0)
+    textures: list = field(default_factory=list)
+    attachment_points: list = field(default_factory=list)
+    string_params: list = field(default_factory=list)
+    float_params: list = field(default_factory=list)
+    int_params: list = field(default_factory=list)
+    vec4_params: list = field(default_factory=list)
+    texture_directory: str = ""
+    filters: str = ""
+    matrix_index: int = -1
+    parent_matrix_index: int = -1
+
+    def compute_size(self, version: int = 6) -> int:
+        return _named_name_width(version) + 4 * len(self.values)
+
+    def get_texture(self, texture_type: int):
+        return None
+
+    def get_int_param(self, index: int):
+        return None
+
+    @staticmethod
+    def parse(buf: bytes, offset: int, material_id: int, size: int,
+              version: int = 6) -> "NamedMaterial":
+        width = _named_name_width(version)
+        raw = bytes(buf[offset:offset + width])
+        count = (size - width) // 4
+        return NamedMaterial(
+            material_id=material_id,
+            model_name=_decode_name(raw, _wide_strings(version)),
+            name_raw=raw,
+            values=struct.unpack_from("<%dI" % count, buf, offset + width))
+
+    def write(self, version: int = 6) -> bytes:
+        raw = self.name_raw
+        width = _named_name_width(version)
+        if len(raw) != width or _decode_name(raw, _wide_strings(version))                 != self.model_name:
+            raw = _encode_name(self.model_name, 256, _wide_strings(version))
+        return raw + struct.pack("<%dI" % len(self.values), *self.values)
 
 
 @dataclass
@@ -1496,6 +1620,10 @@ _DECAL_IDS = (67, 87, 95, 100)
 # one.
 _TRAILING_BLOCK_IDS = (58, 60, 62, 93)
 
+# The 3D interface banners: a name and eight zero words, nothing else.
+# See NamedMaterial.
+_NAMED_MATERIAL_IDS = (29, 30)
+
 
 def _parse_material(buf: bytes, offset: int, material_id: int,
                     expected_size: int, version: int = 6):
@@ -1510,6 +1638,12 @@ def _parse_material(buf: bytes, offset: int, material_id: int,
         mat.material_id = material_id
     elif material_id == MAT_CUSTOM_TERRAIN:
         mat = CustomTerrainMaterial.parse(buf, offset)
+    elif (material_id in _NAMED_MATERIAL_IDS
+            and expected_size >= _named_name_width(version)
+            and (expected_size - _named_name_width(version)) % 4 == 0
+            and expected_size - _named_name_width(version) <= 64):
+        mat = NamedMaterial.parse(buf, offset, material_id, expected_size,
+                                  version)
     elif (material_id in _DECAL_IDS
             and expected_size >= _decal_path_width(version)
             and (expected_size - _decal_path_width(version)) % 4 == 0
@@ -1649,13 +1783,19 @@ _FORMAT_BY_STRIDE = {
     8: VF_POSITION_HALF,
     12: VF_POSITION_UV,
     16: VF_POSITION16,
+    20: VF_SWAY,
     24: VF_S2_BOW_WAVE,
+    # Three layouts are 28 bytes long, but the other two are only ever
+    # reached through the id their material declares, so a mesh that
+    # declares nothing at all and is 28 bytes wide is this one.
+    28: VF_S2_STATIC_NO_UV2,
     32: VF_STATIC,
     36: VF_CUSTOM_TERRAIN,
     60: VF_VEGETATION,
 }
 
 _FORMAT_BY_DECLARED_STRIDE = {
+    (VF_SWAY_DECLARED, 20): VF_SWAY,
     (VF_POSITION16, 8): VF_POSITION_HALF,
     (VF_POSITION16, 28): VF_GRASS,
     (VF_CUSTOM_TERRAIN, 60): VF_VEGETATION,
@@ -1663,6 +1803,29 @@ _FORMAT_BY_DECLARED_STRIDE = {
     (VF_ROME2_TREE, 28): VF_TREE_BILLBOARD,
     (VF_ROME2_WATER, 12): VF_POSITION_UV,
 }
+
+# The inverse, for meshes that have no file to remember.  Position+UV is
+# the one ambiguous case - vegetation declares it 7 and water planes 8 -
+# and 8 is chosen because a mesh authored from scratch at that stride is
+# far more likely to be a water plane than the flat card a tree collapses
+# to, which only ever comes out of a tree that had one already.
+_DECLARED_FORMAT_ID = {}
+for (_declared, _stride), _resolved in _FORMAT_BY_DECLARED_STRIDE.items():
+    _DECLARED_FORMAT_ID.setdefault(_resolved, _declared)
+_DECLARED_FORMAT_ID[VF_POSITION_UV] = VF_ROME2_WATER
+del _declared, _stride, _resolved
+
+
+# Six of the layouts above are this module's own ids, given because the
+# file's own field does not identify them - the game tells those layouts
+# apart by material and stride, not by the number in the header.  A mesh
+# that came from a file remembers what it declared
+# (WeightedMaterial.declared_vertex_format); one built in Blender has to
+# be told, or it would go out declaring an id no game has ever written.
+# Derived from _FORMAT_BY_DECLARED_STRIDE so the two cannot drift apart.
+def declared_format_id(vertex_format: int) -> int:
+    """The vertex-format number to write into a material for this layout."""
+    return _DECLARED_FORMAT_ID.get(vertex_format, vertex_format)
 
 
 def _load_model(buf: bytes, offset: int, version: int) -> tuple[RmvModel, int]:
@@ -1696,8 +1859,9 @@ def _load_model(buf: bytes, offset: int, version: int) -> tuple[RmvModel, int]:
             # actual stride (e.g. the v8 colour variants, or CustomTerrain
             # vs CustomTerrain2).
             resolved = _FORMAT_BY_DECLARED_STRIDE.get((fmt, stride))
-            if resolved is None and isinstance(material, EmptyMaterial):
-                # Nothing declared a format, so the stride is all there is.
+            if resolved is None and fmt < 0:
+                # The header has no vertex-format field (or none at all),
+                # so the stride is the only thing left to go on.
                 resolved = _FORMAT_BY_STRIDE.get(stride)
             for candidate in (VF_STATIC, VF_WEIGHTED, VF_CINEMATIC,
                               VF_COLLISION, VF_POSITION16,

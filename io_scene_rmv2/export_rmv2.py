@@ -788,6 +788,12 @@ def _short_material_from_settings(kind: str, settings, fmt: int,
         values = tuple(float(v) for v in extra.get("decal_values", ()))
         return rf.DecalMaterial(material_id=material_id, vertex_format=fmt,
                                 texture_path=path, values=values)
+    if kind == "named" and material_id in rf._NAMED_MATERIAL_IDS:
+        words = tuple(int(v) for v in extra.get("named_words", ()))
+        return rf.NamedMaterial(
+            material_id=material_id, vertex_format=fmt,
+            model_name=(settings.model_name or obj_name),
+            values=words or (0,) * 8)
     if kind == "terrain_tile" and material_id in rf._TERRAIN_TILE_IDS:
         words = tuple(int(v) for v in extra.get("terrain_words", ()))
         return rf.TerrainTileMaterial(

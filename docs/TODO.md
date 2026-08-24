@@ -1,8 +1,9 @@
 # Where this stands, and what's left
 
-Written 2026-08-23, after version 1.16.0 (Rome 2 and Attila read, every
-format version writes, and every vertex layout the add-on reads it can
-also write). Roughly in priority order within each group.
+Written 2026-08-23, after version 1.17.0 (Rome 2, Attila and Warhammer
+read - Warhammer completely - every format version writes, and every
+vertex layout the add-on reads it can also write). Roughly in priority
+order within each group.
 
 ## Needs a human
 
@@ -54,6 +55,8 @@ version 1.11.0 has gone:
     2f4a619  Rome 2 - two eras of format in one game             (1.14.0)
     686b6fb  Attila, and with it the short material headers      (1.15.0)
     7fd676e  the vegetation and decal formats through Blender    (1.16.0)
+    0fc2290  the merge item brought up to date
+    <this>   Warhammer - the sway vertex and the banner material  (1.17.0)
 
 Nothing on the branch is experimental - every commit ships with corpus
 sweeps and tests - but merging is your call, not this add-on's, and it
@@ -63,7 +66,8 @@ stays a branch until you make it. It fast-forwards:
     git push
 
 Worth doing before the next game, or the branch name outlives its
-meaning: it is called *pre-Rome 2* and now carries Rome 2 and Attila.
+meaning: it is called *pre-Rome 2* and now carries Rome 2, Attila and
+Warhammer.
 
 ## Investigations
 
@@ -114,10 +118,11 @@ answer most of this quickly.
 
 ## The rest of the series
 
-Rome 2 and Attila are installed and swept (B and C below). Warhammer 2
-is an empty shell, Pharaoh has a single mod pack, and Troy and Thrones
-of Britannia are not on disk at all, so those still start with an
-install.
+Rome 2, Attila and Warhammer are swept (B, C and E below), though the
+first two have since been uninstalled - only their samples remain.
+Warhammer 2 is an empty shell, Rome 2 is now down to a single mod pack,
+and Troy and Thrones of Britannia are not on disk at all, so those
+start with an install.
 
 ### A. Troy and Pharaoh - forward from Warhammer 3
 
@@ -195,12 +200,43 @@ sections that carry further indices after their index block.
 Attila stands at **6225 / 6225 `.anim`** and **9971 / 10 015
 `.rigid_model_v2`**; the same work took Rome 2 to **14 452 / 14 673**,
 and Warhammer 3 - which shares most of those materials - from 253
-unreadable meshes to 91 in a 1-in-8 sample.
+unreadable meshes to 91 in a 1-in-8 sample, since re-measured in full at
+591 of 22 230 (see 7).
 
 ### D. Thrones of Britannia - not installed
 
 The last of the middle. Expect Attila's formats exactly; the value is
 confirmation, not new support.
+
+### E. Warhammer - done
+
+Swept 2026-08-24.  One mesh version and one animation version - RMV2 v7
+and `.anim` v5, with 25 v6 meshes - and **everything reads**: 9335 /
+9335 models and 6975 / 6975 animations, byte-for-byte.
+
+Two things in it were new, and both are now supported end to end,
+including through Blender:
+
+- **The sway vertex** (vertex format 12, stride 20), under 255 models.
+  Two half4s whose W components carry the UV between them, then a
+  colour whose alpha is the wind-sway weight.  The position is *not*
+  scaled by its W - the only half position in the format that is not -
+  and adding the material's pivot to the raw half3 reproduces the
+  header's bounding box exactly, which is what settled it.  The normal
+  was checked against the face normals of the triangles that use it,
+  and the alpha against height: it climbs with height in 95% of the
+  game's sway meshes.
+- **The interface-banner material** (ids 29 and 30 at 288 bytes), off
+  the list in 7 below.
+
+It also refined a field two games had already argued about: 291 of
+Warhammer's 6975 animations carry a header word of 0 rather than 1, and
+nearly all of them are the animations that ride on a rigid model -
+buildings, chariots, war machines - rather than a character rig.  That
+is the closest that field has come to having a meaning.
+
+One thing it did *not* have: **`.anim` v6**, still unseen in any vanilla
+file.  Warhammer 2 is the last candidate before Troy.
 
 ## Known gaps
 
@@ -235,18 +271,36 @@ against.
 
 | id | size (v6 / v5) | files | what |
 | --- | --- | --- | --- |
-| 29, 30 | 288 | ~55 in Rome 2, 18 in Attila | the 3D interface banners: a 256-byte model name and eight words |
 | 45 | 524 / 1036 | ~15 | point lights - two paths and three words, going by how the two versions differ |
 | 84 | 1128 | ~7 | Attila's ship night lights |
 | 54, 57 | - / 1104, 1168 | 4 | Rome 2 and Attila's greek statues |
 | 26 | 80 | 123 models | non_renderable |
 | 40 | 544 | 96 models | unidentified, campaign settlements |
 
+Ids 29 and 30 came off this table with Warhammer, which has 19 of them:
+the layout was always "a 256-byte name and eight words", and the words
+are zero in all 19 as they were in the Rome 2 and Attila ones surveyed
+earlier, so they are read as words and written back as they were read.
+That is the fallback this entry proposes, applied to the one case where
+the name half was certain.  The v5 width (512) follows the rule the
+terrain and decal materials set rather than any v5 file, since none has
+been seen.
+
 Also still unread: Warhammer 3's `tree_billboard_material`, which is
-variable-length and starts with a CA string and is now most of what
-fails there (78 of its remaining 91 in a 1-in-8 sample), and vertex
-format id **12** at stride 20 (four files in that sample), plus Rome 2's
-one debug-geometry mesh at the same stride.
+variable-length and starts with a CA string. A full sweep of Warhammer 3
+on 2026-08-24 (21 639 of 22 230 meshes; every `.anim`, all 34 997 of
+them) says it is now **the whole** of that game's gap - all 591
+failures, no other material type left. The sizes say what the shape is:
+the parser reads 1640 or 1700 bytes and the header is 36, 48, 54 or 60
+bytes longer, which is a trailing run of variable length rather than
+another fixed layout. Every one of them is under
+`battleterrain/vegetation/trees/`. That makes it the single highest-value
+material left in the series.
+
+One loose end from the same table: Rome 2's single debug-geometry mesh
+at stride 20 with no material header *should* now resolve, since a
+format-less mesh at that stride reads as the sway vertex - but Rome 2 is
+off the disk, so that is reasoning, not a measurement.
 
 A file with a non-zero example of any of these would settle it. Failing
 that, the honest fallback is to keep an unknown material's bytes
@@ -261,6 +315,16 @@ field - a vegetation vertex's rest position and eight wind weights, a
 bow wave's second position, custom terrain's two spare colour channels -
 live in `RmvMeshData.extras` and travel through Blender as point
 attributes (`rmv2_pivot`, `rmv2_wind_0`, ...).
+
+Warhammer's sway vertex joined them and needed none of that: everything
+it stores lands on an ordinary mesh field.  Adding it did turn up two
+bugs that had been there since the vegetation work, though.  A layout
+that carries vertex colour but was not on a hand-written list - Shogun
+2's static vertex, and the sway one - lost its colours through Blender;
+the check now asks the layout's own dtype instead.  And a mesh built in
+Blender declared this module's private format id rather than the one CA
+writes, so an exported tree, grass patch or water plane said 104, 106 or
+100 where the game reads 6, 5 or 8.  See `declared_format_id`.
 
 What is left of this entry is a question rather than a gap: the wind
 weights are eight halves whose meaning is unknown, and five of the eight

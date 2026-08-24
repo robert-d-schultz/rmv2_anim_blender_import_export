@@ -46,6 +46,10 @@ VERTEX_FORMAT_ITEMS = [
     ("VEGETATION", "Vegetation",
      "Trees and shrubs: a half tangent frame, a rest position and eight "
      "wind weights, the last two kept as point attributes (60 bytes)"),
+    ("SWAY", "Sway",
+     "Warhammer's wind-swayed props - hanging cloth, leaf cards, a "
+     "tree's canopy: position, normal and UV as halves, and a colour "
+     "whose alpha is the sway weight (20 bytes)"),
     ("COLLISION", "Collision",
      "Float32 position and normal, no UVs (24 bytes)"),
     # Shogun 2 only. Its materials have no vertex-format field - the game
@@ -88,6 +92,7 @@ VERTEX_FORMAT_TO_INT = {
     "GRASS": rf.VF_GRASS,
     "TREE_BILLBOARD": rf.VF_TREE_BILLBOARD,
     "VEGETATION": rf.VF_VEGETATION,
+    "SWAY": rf.VF_SWAY,
     "COLLISION": rf.VF_COLLISION,
     "S2_POSITION_UV": rf.VF_S2_POSITION_UV,
     "S2_STATIC": rf.VF_S2_STATIC_NO_UV2,

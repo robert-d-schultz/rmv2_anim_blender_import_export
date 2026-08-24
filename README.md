@@ -48,9 +48,9 @@ the export says what it dropped rather than refusing.
 **Per mesh** you get positions, custom split normals, the full tangent
 basis, both UV channels, vertex colours and bone weights. **Every vertex
 layout the add-on reads, it also writes** — the skinned ones, collision,
-`Position16`, both custom-terrain layouts, Shogun 2's four, and the five
+`Position16`, both custom-terrain layouts, Shogun 2's four, the five
 Rome 2 and Attila added for trees, their billboards, grass, water planes
-and terrain tiles.
+and terrain tiles, and Warhammer's sway vertex.
 
 Some of those layouts carry per-vertex data no ordinary mesh has a slot
 for: a vegetation vertex stores the rest position its branch sways from
@@ -58,10 +58,18 @@ and eight wind weights, a bow wave stores a second position for where
 the crest travels to, custom terrain has two spare colour channels.
 Those ride through Blender as **point attributes** — `rmv2_pivot`,
 `rmv2_wind_0`, `rmv2_pos2` and so on — visible in the spreadsheet,
-editable, and read back on export. The same goes for the material types
-that are not the weighted layout: a decal, a terrain tile or a bow wave
-imported from a file is exported as what it was, not flattened into an
-ordinary material.
+editable, and read back on export.
+
+Warhammer's sway vertex needs none of that — everything it stores lands
+on an ordinary mesh field — but it is worth knowing where: its UV is
+split across the W components of two half4s, and the **sway weight is
+the vertex colour's alpha**, so how far a leaf or a hanging cloth moves
+in the wind is something you can paint.
+
+The same goes for the material types that are not the weighted layout:
+a decal, a terrain tile, a bow wave or an interface banner imported from
+a file is exported as what it was, not flattened into an ordinary
+material.
 
 **Round-trip fidelity.** Re-saving an unmodified file byte-for-byte is a
 tested invariant, checked against every file the games ship:
@@ -75,13 +83,14 @@ tested invariant, checked against every file the games ship:
 | `.anim` | 3758 / 3758 (Empire), 4027 / 4027 (Napoleon) |
 | `.variant_weighted_mesh` | 1045 / 1045 (Empire), 286 / 286 (Napoleon) — every file including `testdata` |
 | `.rigid_model_animation` | 725 / 725 (Empire), 784 / 784 (Napoleon) |
-| Warhammer 3 `.anim` v5–v7 | 8368 / 8368 |
-| Warhammer 3 `.anim` v8 | 6651 / 6651 sampled |
 | Rome 2 `.anim` | 6012 / 6012 — every one, v4 and v5 |
 | Rome 2 `.rigid_model_v2` | 14 452 / 14 673 |
 | Attila `.anim` | 6225 / 6225 |
 | Attila `.rigid_model_v2` | 9971 / 10 015 |
-| Warhammer 3 `.rigid_model_v2` | 2664 / 2755 sampled 1 in 8 (was 2502 before the material work) |
+| Warhammer `.anim` | 6975 / 6975 — every one |
+| Warhammer `.rigid_model_v2` | 9335 / 9335 — every one |
+| Warhammer 3 `.anim` | 34 997 / 34 997 — every one, v5, v7 and v8 |
+| Warhammer 3 `.rigid_model_v2` | 21 639 / 22 230 — every one of the 591 that do not is a `tree_billboard_material` |
 
 Version 8 nearly did not make that bar, and the reason is worth knowing.
 Its byte-packed channels decode as `base + (byte / 127) × scale`, and
@@ -136,15 +145,41 @@ end of a much shorter header. Now decoded:
   the material. The same goes for the extra indices Attila's ropes put
   after their index block.
 
-The same work moved Warhammer 3, which shares most of those materials:
-its unreadable meshes dropped from 253 to 91 in a 1-in-8 sample, and
-what is left there is almost entirely `tree_billboard_material`.
+The same work moved Warhammer 3, which shares most of those materials.
+Swept in full afterwards, it stands at 21 639 of 22 230 meshes, and
+**every single one of the 591 that fail is a `tree_billboard_material`**
+— the one material class left in that game, and now the whole of its
+gap. Its animations are complete: 34 997 of 34 997, v8 included.
 
-What is left is a long tail: banner materials, point lights, a few
-statues and Attila's night lights, 44 files in Attila and 221 in Rome 2.
-Their headers are all "a name or path, then a run of words", but every
-vanilla example has those words at zero, so there is nothing to check a
-guess against.
+**Warhammer** is a quiet game by comparison — one mesh version and one
+animation version, RMV2 v7 and `.anim` v5, with 25 v6 meshes left over —
+and it reads completely: all 9335 models and all 6975 animations. Two
+things in it were new:
+
+- **The sway vertex.** 255 of its models — hanging cloth, bone cages,
+  leaf cards, a tree's canopy — declare vertex format **12**, a number
+  nothing else in the series uses and no reference names. It is 20
+  bytes: two half4s whose W components carry the UV between them, and a
+  colour whose alpha is the wind-sway weight. Unlike every other half
+  position in the format the XYZ is *not* scaled by W, because W is the
+  U coordinate; what settles it is that adding the material's pivot to
+  the raw half3 lands exactly on the header's own bounding box.
+- **The interface-banner material** (ids 29 and 30, 288 bytes), which
+  was on the list below and is now off it: a 256-byte model name and
+  eight words — zero in all 19 of them — on 28-byte vertices its header
+  does not describe at all.
+
+What is left is a shorter tail: point lights, a few statues and Attila's
+night lights. Their headers are all "a name or path, then a run of
+words", but every vanilla example has those words at zero, so there is
+nothing to check a guess against.
+
+Two counts above are older than the banner material and are quoted as
+they were measured: the 44 unreadable files in Attila and 221 in Rome 2
+included their banners, and so do the Rome 2 and Attila rows in the
+table. Both games have since come off this disk, so the honest thing is
+to leave the numbers as they were taken rather than adjust them by
+arithmetic.
 
 That is **every** Empire and Napoleon file of every supported format,
 with one exclusion: Empire's 224 **Elite Units DLC**

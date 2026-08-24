@@ -256,9 +256,12 @@ class AnimFile:
     # The u32 straight after the version.  AssetEditor treats it as a
     # constant 1 and so did this reader, but it is not: of Warhammer 3's
     # 34921 animations, 38 (all v7, all bird03 attacks) carry 2 and one
-    # (a v8 bigcat03b idle) carries 0.  Nothing else about those files
-    # stands out, so it reads as exporter noise rather than a flag with
-    # meaning - but it has to be kept, or those files do not re-save.
+    # (a v8 bigcat03b idle) carries 0, and Three Kingdoms uses all three
+    # freely.  Warhammer 1 is the file set that gives it a shape: 291 of
+    # its 6975 are 0, and nearly all of those are the animations that
+    # ride on a rigid model - buildings, chariots, war machines - rather
+    # than a character rig.  Whatever it means, it has to be kept, or
+    # those files do not re-save.
     header_type: int = 1
     # Version 8 only: the u32 after the bone table.  6 in every
     # vanilla file, so that is what a new one gets.

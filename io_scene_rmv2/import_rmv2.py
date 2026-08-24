@@ -50,9 +50,7 @@ from .properties import VERTEX_FORMAT_FROM_INT
 # ---------------------------------------------------------------------------
 
 def _material_has_colour(fmt: int, version: int) -> bool:
-    if fmt == rf.VF_STATIC or fmt == rf.VF_CUSTOM_TERRAIN2:
-        return True
-    return fmt in (rf.VF_WEIGHTED, rf.VF_CINEMATIC) and version == 8
+    return rf.has_colour(fmt, version)
 
 
 def _bytes_to_hex(raw: bytes) -> str:
@@ -93,6 +91,10 @@ def _build_extra_json(material, model) -> str:
     elif isinstance(material, rf.TerrainTileMaterial):
         extra["material_kind"] = "terrain_tile"
         extra["terrain_words"] = [int(v) for v in material.unknowns]
+    elif isinstance(material, rf.NamedMaterial):
+        # A name and a run of words, and the name is already the object's.
+        extra["material_kind"] = "named"
+        extra["named_words"] = [int(v) for v in material.values]
     elif isinstance(material, rf.EmptyMaterial):
         # Nothing to keep but the fact that there was no header at all.
         extra["material_kind"] = "empty"

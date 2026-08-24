@@ -561,7 +561,7 @@ class TestEveryLayoutWrites(unittest.TestCase):
                 rf.VF_POSITION_UV, rf.VF_S2_STATIC_NO_UV2,
                 rf.VF_S2_STATIC_FLOAT, rf.VF_S2_BOW_WAVE,
                 rf.VF_VEGETATION, rf.VF_TREE_BILLBOARD, rf.VF_GRASS,
-                rf.VF_POSITION_HALF)
+                rf.VF_POSITION_HALF, rf.VF_SWAY)
 
     def test_all_of_them(self):
         mesh = make_cube_mesh(0)
@@ -643,6 +643,149 @@ class TestFixedFieldJunk(unittest.TestCase):
         again = rf.CustomTerrainMaterial.parse(bytes(blob), 0)
         self.assertEqual(again.texture_path, "terrain/tile")
         self.assertEqual(again.write(), bytes(blob))
+
+
+class TestSwayVertex(unittest.TestCase):
+    """Warhammer's wind-sway layout: 20 bytes that declare vertex format
+    12, which is not a stride this module can size on its own."""
+
+    def build(self, count=3):
+        dt = rf._vertex_dtype(rf.VF_SWAY, 7)
+        raw = np.zeros(count, dt)
+        raw["pos"] = [[1.0, 2.0, 3.0]] * count
+        raw["u"] = 0.25
+        raw["normal"] = [[0.0, 1.0, 0.0]] * count
+        raw["v"] = 0.75
+        raw["col"] = [[255, 255, 255, 128]] * count
+        return dt, raw
+
+    def test_stride(self):
+        self.assertEqual(rf.vertex_stride(rf.VF_SWAY, 7), 20)
+
+    def test_only_the_declared_pair_identifies_it(self):
+        """Nothing else in the series is 20 bytes wide, but the id 12 on
+        its own says nothing - the pairing is the key."""
+        self.assertEqual(
+            rf._FORMAT_BY_DECLARED_STRIDE[(rf.VF_SWAY_DECLARED, 20)],
+            rf.VF_SWAY)
+        self.assertEqual(rf._FORMAT_BY_STRIDE[20], rf.VF_SWAY)
+        with self.assertRaises(rf.RmvFormatError):
+            rf.vertex_stride(rf.VF_SWAY_DECLARED, 7)
+
+    def test_the_uv_lives_in_two_different_words(self):
+        """U is the W of the position half4 and V the W of the normal
+        one, so a naive read of either as a scale is wrong."""
+        dt, raw = self.build()
+        mesh = rf.decode_vertices(raw.tobytes(), 0, 3, 20, rf.VF_SWAY, 7)
+        np.testing.assert_allclose(mesh.uv0, [[0.25, 0.75]] * 3)
+        # The position is NOT multiplied by the 0.25 sitting in its W.
+        np.testing.assert_allclose(mesh.positions, [[1.0, 2.0, 3.0]] * 3)
+        np.testing.assert_allclose(mesh.normals, [[0.0, 1.0, 0.0]] * 3)
+
+    def test_the_sway_weight_rides_in_the_alpha(self):
+        dt, raw = self.build()
+        mesh = rf.decode_vertices(raw.tobytes(), 0, 3, 20, rf.VF_SWAY, 7)
+        np.testing.assert_allclose(mesh.colours[:, 3], 128.0 / 255.0,
+                                   atol=1e-6)
+
+    def test_a_decoded_block_re_encodes_byte_for_byte(self):
+        dt, raw = self.build()
+        blob = raw.tobytes()
+        mesh = rf.decode_vertices(blob, 0, 3, 20, rf.VF_SWAY, 7)
+        mesh.raw_block = None          # force a real encode
+        self.assertEqual(rf.encode_vertices(mesh, rf.VF_SWAY, 7), blob)
+
+
+class TestNamedMaterial(unittest.TestCase):
+    """The 3D interface banners, material ids 29 and 30: a 256-byte model
+    name and eight words that are zero in every vanilla file."""
+
+    NAME = "army_banner_strength_fill_lod1"
+
+    def build(self, material_id=30, values=(0,) * 8):
+        return rf.NamedMaterial(material_id=material_id,
+                                model_name=self.NAME, values=values)
+
+    def test_size(self):
+        self.assertEqual(self.build().compute_size(7), 288)
+        # v5 doubles the name, not the words
+        self.assertEqual(self.build().compute_size(5), 544)
+
+    def test_roundtrip(self):
+        for version in (5, 7):
+            with self.subTest(version=version):
+                mat = self.build()
+                blob = mat.write(version)
+                self.assertEqual(len(blob), mat.compute_size(version))
+                again = rf.NamedMaterial.parse(blob, 0, 30, len(blob),
+                                               version)
+                self.assertEqual(again.model_name, self.NAME)
+                self.assertEqual(again.values, mat.values)
+                self.assertEqual(again.write(version), blob)
+
+    def test_a_word_that_is_not_zero_survives(self):
+        """No vanilla file sets one, so the writer must not assume."""
+        mat = self.build(values=(0, 0, 7, 0, 0, 0, 0, 0))
+        again = rf.NamedMaterial.parse(mat.write(7), 0, 30, 288, 7)
+        self.assertEqual(again.values[2], 7)
+
+    def test_junk_after_the_terminator_is_kept(self):
+        raw = bytearray(288)
+        raw[:len(self.NAME)] = self.NAME.encode()
+        raw[len(self.NAME) + 1:len(self.NAME) + 6] = b"stale"
+        mat = rf.NamedMaterial.parse(bytes(raw), 0, 30, 288, 7)
+        self.assertEqual(mat.model_name, self.NAME)
+        self.assertEqual(mat.write(7), bytes(raw))
+
+    def test_the_parser_dispatches_by_id_and_size(self):
+        raw = bytes(288)
+        for material_id in rf._NAMED_MATERIAL_IDS:
+            mat = rf._parse_material(raw, 0, material_id, 288, 7)
+            self.assertIsInstance(mat, rf.NamedMaterial)
+        # The same 288 bytes under any other id are not this material:
+        # they fall through to the weighted layout, which does not fit.
+        with self.assertRaises(rf.RmvFormatError):
+            rf._parse_material(bytes(4096), 0, 68, 288, 7)
+
+    def test_it_declares_no_vertex_format(self):
+        """Which is why _load_model has to fall back to the stride."""
+        self.assertLess(self.build().vertex_format, 0)
+        self.assertEqual(rf._FORMAT_BY_STRIDE[28], rf.VF_S2_STATIC_NO_UV2)
+
+
+class TestDeclaredFormatId(unittest.TestCase):
+    """Six layouts have ids of this module's own making, because the
+    file's field does not identify them.  A material built in Blender has
+    no file to remember what it declared, so writing it back has to go
+    through the id CA actually writes - or the game reads a number it has
+    never seen."""
+
+    def test_the_private_ids_map_back(self):
+        expected = {rf.VF_SWAY: rf.VF_SWAY_DECLARED,
+                    rf.VF_VEGETATION: rf.VF_CUSTOM_TERRAIN,
+                    rf.VF_GRASS: rf.VF_POSITION16,
+                    rf.VF_POSITION_HALF: rf.VF_POSITION16,
+                    rf.VF_TREE_BILLBOARD: rf.VF_ROME2_TREE,
+                    rf.VF_POSITION_UV: rf.VF_ROME2_WATER}
+        for fmt, declared in expected.items():
+            with self.subTest(fmt=rf.VERTEX_FORMAT_NAMES[fmt]):
+                self.assertEqual(rf.declared_format_id(fmt), declared)
+
+    def test_ordinary_layouts_declare_themselves(self):
+        for fmt in (rf.VF_STATIC, rf.VF_WEIGHTED, rf.VF_CINEMATIC,
+                    rf.VF_COLLISION, rf.VF_CUSTOM_TERRAIN2):
+            self.assertEqual(rf.declared_format_id(fmt), fmt)
+
+    def test_a_from_scratch_material_writes_the_right_number(self):
+        mat = rf.WeightedMaterial(material_id=97, vertex_format=rf.VF_SWAY)
+        blob = mat.write(7)
+        self.assertEqual(struct.unpack_from("<H", blob, 0)[0],
+                         rf.VF_SWAY_DECLARED)
+
+    def test_a_loaded_material_keeps_what_the_file_said(self):
+        mat = rf.WeightedMaterial(material_id=97, vertex_format=rf.VF_SWAY)
+        mat.declared_vertex_format = 12
+        self.assertEqual(struct.unpack_from("<H", mat.write(7), 0)[0], 12)
 
 
 class TestDecalMaterial(unittest.TestCase):
