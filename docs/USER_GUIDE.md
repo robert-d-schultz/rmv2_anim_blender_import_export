@@ -1,6 +1,6 @@
 # Total War RigidModel / .anim Blender Add-on
 
-Import/export Creative Assembly's **.rigid_model_v2** meshes and **.anim** skeletons/animations (Rome 2 to Warhammer 3 era) directly in Blender.
+Import/export Creative Assembly's **.rigid_model_v2** meshes and **.anim** skeletons/animations (Rome 2 to Pharaoh Dynasties era) directly in Blender, along with the older games' formats.
 
 ## Install
 
@@ -56,7 +56,18 @@ This is the bit that trips up people used to a flatter Blender scene: the add-on
 - One **root collection** = one in-game model (holds skeleton name, file version, attachment points).
 - Inside it, one **LOD collection per level of detail**, each holding that LOD's meshes.
 
+```
+model_name                 <- root collection: version, skeleton name, attachment points
+├── model_name_lod0        <- LOD collection: camera distance, quality level
+│   ├── body_lod0
+│   └── head_lod0
+├── model_name_lod1        <- hidden on import (eye icon, not excluded)
+└── ...
+```
+
 **[screenshot: outliner showing root + LOD collections]**
+
+All the formats build this same layout, so the panels and the `.anim` importer work the same whichever one a model came from.
 
 If you're building a model from scratch rather than round-tripping an import, set up that same root -> LOD layout first. Select your mesh(es) and use `Object -> Setup RMV2 LOD Collections` in the 3D viewport (also findable via `F3` search) to build it for you from the selection.
 
@@ -70,6 +81,125 @@ There's also an auto-LOD option that generates the lower LODs for you instead of
 
 ## Extra properties are tucked into the normal tabs
 
-Meshes, collections, and armatures all get extra RMV2/`.anim` settings added into Blender's regular Properties editor: Object Properties, Collection Properties, and Object Data Properties (for armatures). Nothing exotic, just look for a panel called **RMV2 (RigidModel)** or **RMV2 (.anim)** if a setting you expect isn't obviously on the surface.
+Meshes, collections, and armatures all get extra RMV2/`.anim` settings added into Blender's regular Properties editor. Look for a panel called **RMV2 (RigidModel)** or **RMV2 (.anim)** if a setting you expect isn't obviously on the surface.
+
+- **Properties -> Object -> RMV2 (RigidModel)** — vertex format, material id, alpha mode, shader, render flag, texture directory and texture slot list, matrix index. **Copy RMV2 Settings to Selected** transfers the lot between objects.
+- **Properties -> Collection -> RMV2 (RigidModel)** — on the root: file version, skeleton name, attachment points, auto-LOD override rows. On a LOD collection: level, camera distance, quality level.
+- **Properties -> Object Data -> RMV2 (.anim)** (armatures) — skeleton name, `.anim` version, frame rate, flags. These become the export defaults.
 
 **[screenshot: an RMV2 panel in the Properties editor]**
+
+---
+
+# Worked examples
+
+## A Warhammer-era unit
+
+1. `File -> Import -> Total War Animation (.anim)` — pick the model's skeleton from `animations/skeletons/` (e.g. `humanoid01.anim`). This builds the armature.
+2. `File -> Import -> Total War RigidModel (.rigid_model_v2)` — the meshes attach to that armature and their vertex groups get real bone names.
+3. Import more `.anim` files onto the same armature for animations, each arriving as its own action.
+
+The other order works too: import the model first, then the skeleton — the importer renames the `bone_<i>` vertex groups and parents the meshes retroactively, hidden LOD collections included. If you don't know which skeleton a model wants, its name is on the root collection under `Properties -> Collection -> RMV2`.
+
+## A Shogun 2 unit part
+
+1. `File -> Import -> Total War Animation (.anim)` — import the model's **reference** skeleton from `animations/shogun_animation/.../reference/` (`man_shogun`, `horse`, `deer`, `bird`, `bear`, `whale`, `campaign_ship`).
+2. Leave the armature selected.
+3. `File -> Import -> Total War Shogun 2 Unit Part (.variant_part_mesh)`.
+
+Import it without an armature and you still get a mesh — the bind pose is reconstructed from the file's own geometry — but it is approximate, bones it can't reach are reported, and the importer warns you. **Export refuses without an armature**, rather than writing something wrong.
+
+Don't know which skeleton? Import the part anyway: the file names it, and the importer tells you (`skeleton: man_shogun`), so you can load the right one and re-import.
+
+## An Empire or Napoleon unit
+
+Empire's units are `.variant_weighted_mesh`, one file per unit per LOD, holding every body part its variants can draw.
+
+1. `File -> Import -> Total War Animation (.anim)` — import `animations/reference/tpose.anim`. Every unit model in both games is rigged to this same 41-bone skeleton, so there is nothing to guess.
+2. Leave the armature selected.
+3. `File -> Import -> Total War Empire Unit Mesh (.variant_weighted_mesh)` — pick `<unit>_lod1` … `<unit>_lod4`; you can select all four at once.
+
+The `_lodN` suffix is understood, so the four files fill in **one** root collection as LOD 0–3 (CA numbers from 1, Blender from 0) rather than making four unrelated models.
+
+Textures are not named inside the file; they are looked up by convention as `unitmodels/textures/<unit>_diffuse.dds` (and `_normal`, `_gloss_map`) under your Texture Root.
+
+## An Empire destruction prop
+
+`.rigid_model_animation` is self-contained — the `.animatable_rigid_model` object list followed by a whole headerless `.anim` — so there is nothing to import first. `File -> Import -> Total War Animated RigidModel (.rigid_model_animation)` builds the armature from the file, keys its animation as an action, and welds each object to the bone it rides on.
+
+---
+
+# Reference
+
+## Menu entries
+
+Everything lives under `File -> Import` and `File -> Export`:
+
+| Entry | Handles |
+| --- | --- |
+| Total War RigidModel (.rigid_model_v2) | Every RMV2 era, Shogun 2 included |
+| Total War Shogun 2 RigidModel (.animatable_rigid_model, .rigid_model) | Both forms; the extension you pick decides which gets written |
+| Total War Shogun 2 Unit Part (.variant_part_mesh) | Skinned parts, rigid equipment, and library files |
+| Total War Empire Unit Mesh (.variant_weighted_mesh) | Empire/Napoleon skinned units, one file per LOD |
+| Total War Animated RigidModel (.rigid_model_animation) | Objects and the animation that moves them, in one file |
+| Total War Animation (.anim) | Skeletons and animations alike |
+
+**One `.anim` entry does both jobs.** Skeleton files are just animations whose two or three frames all repeat the bind pose, so the importer looks at the file and the scene: no armature yet plus a bind-pose-looking file builds the armature; otherwise the frames are keyed onto the existing armature as an action.
+
+## Import options
+
+| Option | Where | Meaning |
+| --- | --- | --- |
+| Import All LODs | RMV2 | Off (default): finest LOD only. On: every LOD in its own collection |
+| LODs | Unit Part | *All*, or *Most detailed only* |
+| Build Materials | RMV2, Shogun 2 RigidModel, Unit Mesh, Animated RigidModel | Build Principled BSDF node trees from the file's textures |
+| Texture Root | as above | Override the preferences folder for this import |
+| Attachment Point Empties | RMV2 | Create empties for the file's attachment points |
+| Attach To Selected Armature | RMV2, Shogun 2 RigidModel, Unit Part | Bind to a selected armature and use its bone names |
+| Attach Meshes | .anim | Rename `bone_<i>` groups and parent the model's meshes |
+| Import Frames As Action | .anim | Also key the frames when the file is used to build a fresh armature |
+| Scale | all | Uniform scale — keep it the same across a model and its `.anim` |
+
+Multi-file selection works for RMV2, Shogun 2 RigidModel, Unit Part, Unit Mesh and Animated RigidModel.
+
+## Export options
+
+| Option | Where | Meaning |
+| --- | --- | --- |
+| Source | all meshes | *Auto* (active model, else selection), *Selected*, *Visible* — plus *Active Collection* and *Batch* (one file per RMV2 collection in the scene) for RMV2 |
+| Version | RMV2, Shogun 2 RigidModel, .anim | Target file version — the RigidModel entry spans 5/4/3 and the older 1 and headerless-0 objects |
+| Skeleton | RMV2, Unit Part, .anim | Header skeleton name; defaults to what was stored at import |
+| Generate LODs (Decimate) | RMV2 | Build the lower LODs from the finest by decimation instead of using LOD collections |
+| Apply Modifiers | all meshes | Export the evaluated mesh. Armature deform is *always* excluded, so the rest pose is written |
+| High Precision Positions | RMV2 | CA's half-float `W`-scale trick for extra precision (slower) |
+| Attachment Points | RMV2 | Write them, from the collection's list or the armature's bones |
+| Mode | .anim | *Animation* samples the scene frame range; *Bind Pose (Skeleton)* writes the rest pose |
+| Frame Rate | .anim | 0 = use the armature's stored rate, else the scene's |
+| LOD Level | Unit Mesh | Which level to write — one file is one LOD in that format, so a full ladder is four exports |
+| Frame Start / End | Animated RigidModel | Range sampled for the embedded animation |
+
+## Things that will trip you up
+
+**"Nothing to export."** Make the model's collection active in the outliner, or select the meshes. For `.variant_part_mesh` **libraries**, use the collection — non-finest LODs import hidden, so a selection would only catch LOD 0.
+
+**Unit-part export refuses without an armature.** By design: the format has nowhere to put a vertex except in a bone's space. Import the reference `.anim` and attach the meshes. If the meshes really are unskinned props, set their *Vertex Format* to **Variant Part Rigid** in the Object panel.
+
+**Vertex counts change.** Vertices are welded at the file's own precision, and hard edges and UV seams split them — so counts can differ from Blender's in both directions. The hard ceiling is **65,536 vertices per mesh** (16-bit indices); past that, split the object.
+
+**Skinned export needs resolvable bone indices.** Keep the vertex group names the importer made (`bone_12`-style, or real bone names after a `.anim` import), or use an armature whose bone order matches the game skeleton. Bone *order* is what the game cares about — armatures this add-on creates stamp each bone with an `rmv2_bone_index` custom property, so renaming and reordering bones in Blender is safe.
+
+**Textures don't show up.** Set the **Texture Root Directory** in the add-on preferences to your extracted-texture folder. The file stores paths, not images.
+
+**Scale must match.** If you import a model at a non-default scale, import its `.anim` at the same one.
+
+**Moving an object moves the file's pivot.** RMV2 vertices are stored relative to a pivot the game adds back at render time, so the importer puts the pivot at the object's origin. On export the object's world *translation* becomes the pivot; rotation and scale are baked into the vertices. (Shogun 2 has no pivot field — its meshes live in bone space — so there the translation goes into the vertices too.)
+
+**"This file is for skeleton X."** The armature remembers which skeleton it was built from and refuses an animation meant for a different one, so you find out immediately rather than after the pose comes out mangled.
+
+**A model gets exactly one armature.** Importing a second skeleton onto a model that already has one is an error, not a silent second rig. To rig a *different* model with the same skeleton, select that model's meshes or collection first.
+
+**Shogun 2 has no separate skeleton files.** Every `.anim` carries the full bone table, and models name the `.anim` they belong to rather than the other way round.
+
+**Empire unit meshes need `tpose.anim` first.** `.variant_weighted_mesh` does not even name its skeleton — it does not have to, since every unit in Empire and Napoleon uses the same 41-bone rig at `animations/reference/tpose.anim`. Import that, leave it selected, then import the mesh.
+
+**One `.variant_weighted_mesh` is one LOD.** The ladder is four separate files, so a full export is four exports with *LOD Level* set to 0, 1, 2, 3 — writing files named `<unit>_lod1` … `<unit>_lod4`, the way CA numbers them. On import the suffix is read back and the four files share a single root collection.

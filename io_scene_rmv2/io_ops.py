@@ -38,7 +38,7 @@ ANIM_VERSION_ITEMS = [
     ("4", "Anim v4", "Rome 2's first version: UTF-16 strings, and every "
      "bone stored in every frame as float32"),
     ("5", "Anim v5", "Rome 2 era, and all but 31 of its animations"),
-    ("6", "Anim v6", "Attila era"),
+    ("6", "Anim v6", "Between Rome 2's v5 and Warhammer 2's v7 - but no vanilla file of any game uses it, so this is written from the versions either side of it and has never met real data"),
     ("7", "Anim v7", "Warhammer 1/2/3 era (the version AssetEditor and "
      "the games' modding pipelines expect)"),
     ("8", "Anim v8", "Warhammer 3 era, and three quarters of its "

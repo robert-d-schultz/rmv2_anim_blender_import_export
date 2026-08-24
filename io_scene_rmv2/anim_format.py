@@ -100,9 +100,9 @@ import numpy as np
 # Version 1 is Shogun 2 (see the module docstring); it shares none of the
 # v5+ body layout and is handled by its own reader/writer below.
 #
-# Version 4 (Napoleon-era) remains unsupported: like v1 it uses UTF-16
-# strings and a non-v5 body layout, but no sample was available to
-# reverse-engineer it (AssetEditor cannot read real v4 files either).
+# Version 4 is Rome 2's first version, decoded from its own files: like v1
+# it uses UTF-16 strings and stores every bone in every frame, but the rest
+# of the body is v5's.  AssetEditor cannot read real v4 files.
 SHOGUN2_VERSION = 1
 
 # Some Shogun 2 files (campaign pieces, and a few reference skeletons) have
