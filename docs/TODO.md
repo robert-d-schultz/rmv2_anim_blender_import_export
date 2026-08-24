@@ -56,7 +56,7 @@ version 1.11.0 has gone:
     686b6fb  Attila, and with it the short material headers      (1.15.0)
     7fd676e  the vegetation and decal formats through Blender    (1.16.0)
     0fc2290  the merge item brought up to date
-    <this>   Warhammer - the sway vertex and the banner material  (1.17.0)
+    8400791  Warhammer - the sway vertex and the banner material (1.17.0)
 
 Nothing on the branch is experimental - every commit ships with corpus
 sweeps and tests - but merging is your call, not this add-on's, and it
