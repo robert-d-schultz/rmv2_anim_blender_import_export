@@ -5,15 +5,15 @@ Imports and exports meshes, skeletons, skinning, LODs, materials and
 animations for every Total War from **Empire (2009)** to **Pharaoh
 Dynasties (2023)**.
 
-Every file version it reads, it also writes, and re-saving an unmodified
-file reproduces it byte for byte — see [corpus results](docs/CORPUS.md).
+Every file version it reads, it also writes, so a model can go back out
+as the game that shipped it expects — or as a different one.
 
 |  |  |
 | --- | --- |
 | **Blender** | 4.2+ as an extension, 3.6+ as a legacy add-on (developed against 5.2) |
 | **Download** | [Latest release](https://github.com/robert-d-schultz/rmv2_anim_blender_import_export/releases/latest) |
 | **Game files** | Unpack `.pack` archives with [RPFM](https://github.com/Frodo45127/rpfm) |
-| **Docs** | [User guide](docs/USER_GUIDE.md) · [Format notes](docs/FORMATS.md) · [Corpus results](docs/CORPUS.md) |
+| **Docs** | [User guide](docs/USER_GUIDE.md) · [Format notes](docs/FORMATS.md) |
 
 ## Install
 
@@ -46,17 +46,17 @@ matters.
 | `.rigid_model_v2` | Meshes, LODs, materials | Shogun 2, and Rome 2's UI models | 1, 2, 3 |
 | `.anim` | Skeletons and animations | Rome 2 → Pharaoh | 4, 5, 6 †, 7, 8 |
 | `.anim` | Skeletons and animations | Shogun 2, Empire, Napoleon | 1, and a headerless variant (0) |
-| `.animatable_rigid_model` | Bone-welded props — siege engines, ballistae | Shogun 2, Empire, Napoleon | object 0 – 5 |
-| `.rigid_model` | The same, without the bone index | Shogun 2, Empire, Napoleon | object 0 – 5 |
+| `.animatable_rigid_model` | Jointed props whose parts ride bones — siege engines, ballistae | Shogun 2, Empire, Napoleon | object 0 – 5 |
+| `.rigid_model` | The same container for static geometry — buildings, scenery, props. No rig at all | Shogun 2, Empire, Napoleon | object 0 – 5 |
 | `.variant_part_mesh` | Skinned unit parts — helmets, torsos, saddles | Shogun 2 | 0, 2, 3 |
 | `.variant_weighted_mesh` | Skinned units, one file per LOD | Empire, Napoleon | 1, and a headerless variant (0) |
 | `.rigid_model_animation` | An object list plus its own animation | Empire, Napoleon | 3, 4, 5 |
 
-**Everything in that table reads *and* writes** — including the versions
-AssetEditor will not write (`.anim` v8, RMV2 v5) and the two Rome 2
-shipped with and dropped mid-life, which appear in no reference this
-project knows of (RMV2 v3, `.anim` v4). The exporter offers the whole
-list, so a model imported from one game can be written out for another.
+**Everything in that table reads *and* writes**, including the versions
+no other tool will write for you: `.anim` v8, RMV2 v5, and the two Rome 2
+shipped with and dropped mid-life (RMV2 v3, `.anim` v4). The exporter
+offers the whole list, so a model imported from one game can be written
+out for another.
 
 † `.anim` v6 is implemented from the versions either side of it and has
 never been seen in a vanilla file — see [Not supported](#not-supported).
@@ -125,30 +125,12 @@ blocks, which nothing in Blender could rebuild, are preserved verbatim.
 | Encrypted DLC | Empire's 224 Elite Units `.variant_weighted_mesh` files and Pharaoh's 59 `data_special.pack` meshes ship under a cipher, and are deliberately left alone. Napoleon's equivalents are in the clear and work normally |
 | A tail of material headers | Ids 26, 40, 45, 54/57 and 84 — point lights, Attila's night lights, statues, settlement pieces. Each is plainly "a name, then a run of words", but every vanilla example has those words at zero, so a layout guess has nothing to be wrong against |
 | `.variant_part_mesh` v0 and v2 on export | They read fine but re-export as v3, and the material parameter block, the `crests` attachment and non-default material names are not carried through. Geometry, names, slots and skinning are |
-| Medieval 2 and earlier | Different formats entirely, and absent from the C# reference the rest of this is built against |
+| Medieval 2 and earlier | Different formats entirely — a separate job, and not started |
 
-## Round-trip fidelity
+## Credits
 
-Re-saving an unmodified file byte-for-byte is a tested invariant, checked
-against every file the games ship — around 190,000 of them across nine
-games. Warhammer, Warhammer 3 and Pharaoh Dynasties read **completely**.
-The per-game table, and what each game turned up, is in
-[docs/CORPUS.md](docs/CORPUS.md).
-
-## Development
-
-```
-python tests/test_format.py                     # format layer, no Blender
-blender --background --factory-startup --python tests/test_blender_roundtrip.py
-```
-
-The format layer (`rmv2_format.py`, `anim_format.py`, `arm_format.py`,
-`vmpf_format.py`, `vwm_format.py`) is bpy-free and usable as a standalone
-library — see [docs/FORMATS.md](docs/FORMATS.md) for the layouts and a
-usage example.
-
-Binary layout for the RMV2-era formats follows the C# reference in
-[TheAssetEditor](https://github.com/donkeyProgramming/TheAssetEditor)
-(`Shared/GameFiles/RigidModel`, `Shared/GameFiles/Animation`)
-byte-for-byte. The pre-Rome 2 formats are in neither that nor RPFM, and
-were reverse-engineered from the games' own packs.
+- [TheAssetEditor](https://github.com/donkeyProgramming/TheAssetEditor)
+  by donkeyProgramming, and CA's own developers who documented parts of
+  these formats to it.
+- [RPFM](https://github.com/Frodo45127/rpfm) by Frodo45127, for getting
+  the files out of a `.pack` in the first place.
