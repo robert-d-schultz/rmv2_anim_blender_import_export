@@ -60,7 +60,7 @@ version 1.11.0 has gone:
     bcf992f  that commit named in this list
     1bb529f  the tree billboard, and Warhammer 3 complete   (1.18.0)
     2a4c73a  that commit named in this list
-    <this>   Pharaoh Dynasties, which needed nothing
+    c52609d  Pharaoh Dynasties, which needed nothing
 
 Nothing on the branch is experimental - every commit ships with corpus
 sweeps and tests - but merging is your call, not this add-on's, and it
