@@ -45,13 +45,25 @@ retire more risk than any amount of further corpus work.
 
 ### 3. Merge the branch
 
-Everything since `76d4e28` sits on `pre-rome2-formats-and-all-versions`,
-not on `main`: the Shogun 2, Empire/Napoleon,
-`.variant_weighted_mesh`, `.rigid_model_animation`, version-writing and
-Rome 2 work. Fast-forwarding `main` onto it is a one-liner and your
-call, not this add-on's:
+`main` is still at `76d4e28`, five commits and ~12,000 lines behind
+`pre-rome2-formats-and-all-versions`, which is where everything since
+version 1.11.0 has gone:
+
+    0f1c106  the pre-Rome 2 formats, and writing every version   (1.13.0)
+    c4c3ace  the remaining games added to this list
+    2f4a619  Rome 2 - two eras of format in one game             (1.14.0)
+    686b6fb  Attila, and with it the short material headers      (1.15.0)
+    7fd676e  the vegetation and decal formats through Blender    (1.16.0)
+
+Nothing on the branch is experimental - every commit ships with corpus
+sweeps and tests - but merging is your call, not this add-on's, and it
+stays a branch until you make it. It fast-forwards:
 
     git checkout main && git merge --ff-only pre-rome2-formats-and-all-versions
+    git push
+
+Worth doing before the next game, or the branch name outlives its
+meaning: it is called *pre-Rome 2* and now carries Rome 2 and Attila.
 
 ## Investigations
 
