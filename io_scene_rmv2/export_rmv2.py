@@ -89,6 +89,13 @@ def _lod_children(root):
     for child in root.children:
         if child.rmv2.is_rmv2_root:
             continue
+        if not _mesh_objects(child):
+            # A child with no meshes anywhere in it is not a level. The
+            # importer puts attachment-point empties in a `<model>_attach`
+            # collection beside the LODs, and that sorts ahead of
+            # `_lod0`, so counting it made every such model fail to
+            # export with "LOD 0: no exportable meshes".
+            continue
         level = child.rmv2.lod_level
         if not level:
             match = _LOD_NAME_PATTERN.search(child.name)

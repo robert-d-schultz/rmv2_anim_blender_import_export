@@ -617,9 +617,14 @@ def has_colour(vertex_format: int, version: int) -> bool:
     the Shogun 2 static vertex and Warhammer's sway vertex both carry a
     colour, and the sway one keeps its wind weight in the alpha."""
     try:
-        return "col" in _vertex_dtype(vertex_format, version).names
+        names = _vertex_dtype(vertex_format, version).names
     except RmvFormatError:
         return False
+    # CustomTerrain2 calls its first colour col0 (it has three), so a
+    # bare "col" test missed it and the importer built no colour
+    # attribute - which meant an edited one re-exported with the channel
+    # zeroed.
+    return "col" in names or "col0" in names
 
 
 def _weight_count(vertex_format: int) -> int:

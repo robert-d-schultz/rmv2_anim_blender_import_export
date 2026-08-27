@@ -387,6 +387,14 @@ def _store_metadata(arm_obj, anim: af.AnimFile):
     # .anim; keep them so a re-export does not silently drop them.
     s.events_json = json.dumps([list(e) for e in anim.events]) \
         if anim.events else ""
+    # Whether there is a block at all is separate from whether it has
+    # anything in it: Rome 2's v4 and v5 write an empty one, and 59
+    # vanilla files carry a second.
+    s.has_event_block = bool(anim.has_event_block)
+    s.extra_event_blocks_json = json.dumps(
+        [[list(e) for e in block]
+         for block in anim.extra_event_blocks]) \
+        if anim.extra_event_blocks else ""
 
 
 # ---------------------------------------------------------------------------

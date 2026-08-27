@@ -39,7 +39,12 @@ FORMATS = {
     ".anim": (anim_format.load, anim_format.save),
     ".animatable_rigid_model": (arm_format.load, arm_format.save),
     ".rigid_model": (arm_format.load, arm_format.save),
-    ".rigid_model_animation": (arm_format.load, arm_format.save),
+    # This one is objects followed by an embedded .anim, so the reader
+    # has to be told to allow the trailing bytes - without it every
+    # single file counted as unreadable.
+    ".rigid_model_animation": (
+        lambda data: arm_format.load(data, allow_trailing=True),
+        arm_format.save),
     ".variant_part_mesh": (vmpf_format.load, vmpf_format.save),
     ".variant_weighted_mesh": (vwm_format.load, vwm_format.save),
 }

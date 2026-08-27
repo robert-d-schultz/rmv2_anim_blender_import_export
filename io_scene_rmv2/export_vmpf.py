@@ -362,8 +362,12 @@ def export_file(context, filepath: str, options: dict):
             "or set the meshes' Vertex Format to Variant Part Rigid if "
             "they are unskinned props")
 
-    frames = (skeleton.bind_frames_in_game_space(armature)
-              if armature else {})
+    # Scaled, like every other caller: welded positions are multiplied
+    # by global_scale, and _bone_local subtracts a bone origin from them.
+    # An unscaled bind pose there put every skinned vertex somewhere
+    # wrong at any scale but 1.
+    frames = (skeleton.bind_frames_in_game_space(
+        armature, options.get("global_scale", 1.0)) if armature else {})
 
     model = vf.VmpfFile(
         version=int(chosen_version(

@@ -119,6 +119,23 @@ def _stored_events(arm_settings, warnings) -> list:
         return []
 
 
+def _stored_extra_event_blocks(arm_settings, warnings) -> list:
+    """The event blocks after the first, as read back from
+    the armature."""
+    raw = (arm_settings.extra_event_blocks_json or "").strip()
+    if not raw:
+        return []
+    try:
+        blocks = json.loads(raw)
+        return [[tuple(str(v) for v in event) for event in block]
+                for block in blocks]
+    except (ValueError, TypeError) as exc:                # noqa: BLE001
+        warnings.append(
+            f"Extra event blocks could not be read back ({exc}); "
+            "exporting without them")
+        return []
+
+
 def build_anim(context, options: dict, warnings: list):
     """The AnimFile the selected armature and its pose would be written
     as.
@@ -211,6 +228,14 @@ def build_anim(context, options: dict, warnings: list):
 
     if version in (af.SHOGUN2_VERSION, af.SHOGUN2_NO_HEADER_VERSION):
         anim.events = _stored_events(arm_settings, warnings)
+
+    # The block is not Shogun 2's alone - Rome 2's v4 and v5 end
+    # with an empty one, and build_simple leaves has_event_block
+    # False, so a round trip through Blender wrote the file
+    # shorter than it was read.
+    anim.has_event_block = bool(arm_settings.has_event_block)
+    anim.extra_event_blocks = _stored_extra_event_blocks(
+        arm_settings, warnings)
 
     return anim, arm_obj, num_frames
 

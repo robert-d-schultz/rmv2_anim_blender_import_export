@@ -3382,11 +3382,23 @@ def lod_is_derived_case(tmpdir):
     from io_scene_rmv2 import capabilities
     reset_scene()
 
+    def lod_collection(root, name):
+        """A LOD collection with a mesh in it - a level with no meshes is
+        not a level, which is how the importer's `<model>_attach`
+        collection of empties stays out of the ladder."""
+        col = bpy.data.collections.new(name)
+        root.children.link(col)
+        bpy.ops.mesh.primitive_cube_add()
+        obj = bpy.context.active_object
+        for other in list(obj.users_collection):
+            other.objects.unlink(obj)
+        col.objects.link(obj)
+        return col
+
     root = bpy.data.collections.new("model")
     bpy.context.scene.collection.children.link(root)
     root.rmv2.is_rmv2_root = True
-    child = bpy.data.collections.new("model_lod1")
-    root.children.link(child)
+    child = lod_collection(root, "model_lod1")
 
     check(capabilities.is_lod(child),
           "a collection inside a model root is a LOD, with nothing set "
@@ -3410,11 +3422,23 @@ def lod_is_derived_case(tmpdir):
           "it is its own model now")
     check([c for c in export_rmv2._lod_children(root)] == [],
           "and its parent stops counting it as a level")
+    check(export_rmv2._lod_children(root) == [],
+          "a root whose only child is its own model has no levels")
     child.rmv2.is_rmv2_root = False
 
     # A ladder built by hand, with nobody opening the panel.
     for level in (2, 3):
-        root.children.link(bpy.data.collections.new("model_lod%d" % level))
+        lod_collection(root, "model_lod%d" % level)
+
+    # The importer's attachment-point collection holds empties, not
+    # meshes, and sorts ahead of _lod0 - counting it as a level made
+    # every model imported with attachment empties fail to export.
+    attach = bpy.data.collections.new("model_attach")
+    root.children.link(attach)
+    empty = bpy.data.objects.new("ap_root", None)
+    attach.objects.link(empty)
+    check(export_rmv2._mesh_objects(attach) == [],
+          "the attachment collection holds no meshes")
     levels = [level for level, _ in export_rmv2._lod_children(root)]
     check(levels == [1, 2, 3],
           f"levels come from the names while LOD Level is still 0 "

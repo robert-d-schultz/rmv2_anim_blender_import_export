@@ -866,6 +866,15 @@ class RMV2ArmatureSettings(bpy.types.PropertyGroup):
         name="Flags", default="",
         description="Comma-separated v7+ animation flag strings (rare, "
         "e.g. shake_camera), preserved for re-export")
+    has_event_block: BoolProperty(
+        name="Event Block", default=False,
+        description="Whether the file ends with an event block. Rome 2's "
+        "v4 and v5 write an empty one and Shogun 2 fills it in; dropping "
+        "it on export made the file shorter than it came in")
+    extra_event_blocks_json: StringProperty(
+        name="Extra Event Blocks", default="",
+        description="Further event blocks after the first, as JSON. "
+        "Preserved for re-export")
     events_json: StringProperty(
         name="Events", default="",
         description="Shogun 2 animation events (FIRE_TIME, OFF_BONE1, "

@@ -1006,7 +1006,12 @@ def _v8_ranges(part: AnimPart, rates: tuple, index: int) -> tuple:
             (part.rotation_ranges, rates[1], _V8_ROT_RANGED, 4, True)):
         needed = _v8_channel_values(part, rate_array, ranged, rotations)
         if not needed:
-            out.append(np.zeros((0, 2, width), np.float32))
+            # No channel uses a ranged rate *now*, but a table read from
+            # the file is still the file's - dropping it rewrote the
+            # part shorter than it came in.
+            out.append(np.zeros((0, 2, width), np.float32)
+                       if stored is None or not len(stored)
+                       else np.asarray(stored, np.float32))
             continue
 
         size = max(len(stored) if stored is not None else 0,
