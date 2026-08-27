@@ -46,34 +46,16 @@ a round trip. **Nothing has ever been loaded by a Total War executable.**
 A single exported unit that renders correctly in Warhammer 3 would
 retire more risk than any amount of further corpus work.
 
-### 3. Merge the branch
+### 3. Merge the branch - done
 
-`main` is still at `76d4e28`, five commits and ~12,000 lines behind
-`pre-rome2-formats-and-all-versions`, which is where everything since
-version 1.11.0 has gone:
+Merged at 1.20.0. `pre-rome2-formats-and-all-versions` fast-forwarded
+into `main` - twenty commits, everything from version 1.13.0 onwards:
+the pre-Rome 2 formats and writing every version, then Rome 2, Attila,
+Warhammer, Warhammer 3 and Pharaoh Dynasties, then the corpus tooling
+and the pass that made the panels follow the file format.
 
-    0f1c106  the pre-Rome 2 formats, and writing every version   (1.13.0)
-    c4c3ace  the remaining games added to this list
-    2f4a619  Rome 2 - two eras of format in one game             (1.14.0)
-    686b6fb  Attila, and with it the short material headers      (1.15.0)
-    7fd676e  the vegetation and decal formats through Blender    (1.16.0)
-    0fc2290  the merge item brought up to date
-    8400791  Warhammer - the sway vertex and the banner material (1.17.0)
-    bcf992f  that commit named in this list
-    1bb529f  the tree billboard, and Warhammer 3 complete   (1.18.0)
-    2a4c73a  that commit named in this list
-    c52609d  Pharaoh Dynasties, which needed nothing
-
-Nothing on the branch is experimental - every commit ships with corpus
-sweeps and tests - but merging is your call, not this add-on's, and it
-stays a branch until you make it. It fast-forwards:
-
-    git checkout main && git merge --ff-only pre-rome2-formats-and-all-versions
-    git push
-
-Worth doing before the next game, or the branch name outlives its
-meaning: it is called *pre-Rome 2* and now carries Rome 2, Attila, both
-Warhammers, Warhammer 3 and Pharaoh.
+The branch name had long outlived its meaning - it was called *pre-Rome
+2* and carried six games after it. Work continues on `main`.
 
 ## Investigations
 
