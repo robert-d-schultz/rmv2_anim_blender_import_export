@@ -8,6 +8,14 @@ difference allowed is `EXPORT_SIGNATURE` in v7/v8 LOD padding.
 Numbers are as measured, on the date they were measured. Games come and
 go off the disk as each is swept, so most cannot be re-run.
 
+**How to run one.** `python tools/sweep_roundtrip.py <game> "<install>"`.
+It reads every vanilla file of every format this add-on supports, writes
+it back, and reports anything that is not byte-identical with its
+offsets. Pack access goes through RPFM's CLI rather than a reader of our
+own, and CA's packs are told from mods by the game's own manifest - see
+[tools/README.md](../tools/README.md), which also records the two ways a
+sweep produced confident wrong numbers before those rules were in place.
+
 ## Byte-identical re-saves
 
 | Format | Vanilla files re-saved byte-identically |
