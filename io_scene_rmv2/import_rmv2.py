@@ -3,7 +3,7 @@
 Scene layout created per file:
 
     <name>                  (collection, rmv2.is_rmv2_root, version/skeleton)
-      <name>_lod0           (collection, rmv2.is_lod, camera distance...)
+      <name>_lod0           (collection; a LOD is any child of a root)
           mesh objects      (rmv2 object settings filled in)
       <name>_lod1
       ...
@@ -42,7 +42,7 @@ from . import rmv2_format as rf
 from . import scene_layout
 from . import skeleton
 from . import utils
-from .properties import VERTEX_FORMAT_FROM_INT
+from .properties import VERTEX_FORMAT_FROM_INT, set_format_version
 
 
 # ---------------------------------------------------------------------------
@@ -249,8 +249,7 @@ def import_file(context, filepath: str, options: dict):
     scale = options.get("global_scale", 1.0)
 
     root = scene_layout.new_root(context, stem, rmv.skeleton_name)
-    if str(rmv.version) in {"1", "2", "6", "7", "8"}:
-        root.rmv2.version = str(rmv.version)
+    set_format_version(root.rmv2, "RMV2", rmv.version)
 
     # An already-selected armature (e.g. from a .anim import) supplies the
     # bone names and the meshes get attached to it below. Without one,
@@ -318,6 +317,9 @@ def import_file(context, filepath: str, options: dict):
             lod.lod_level if rmv.version >= 7 else lod_index)
         lod_collections.append((lod_index, col))
         col.rmv2.camera_distance = lod.camera_distance
+        # These came out of a file, so the exporter uses them rather
+        # than the era's defaults - see export_rmv2._lods_for_root.
+        col.rmv2.lod_values_set = True
         col.rmv2.quality_level = lod.quality_level
         stats["lods"] += 1
 

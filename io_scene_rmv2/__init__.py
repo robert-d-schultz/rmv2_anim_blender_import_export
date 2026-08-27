@@ -68,7 +68,7 @@ built from scratch starts at what Warhammer 3 most commonly ships.
 bl_info = {
     "name": "Total War RigidModel (.rigid_model_v2, .anim)",
     "author": "rob + Claude",
-    "version": (1, 18, 0),
+    "version": (1, 20, 0),
     "blender": (3, 6, 0),
     "location": "File > Import-Export",
     "description": "Import-Export Total War RigidModel v2 meshes "

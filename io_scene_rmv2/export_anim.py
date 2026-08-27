@@ -27,6 +27,7 @@ import bpy
 from mathutils import Matrix
 
 from . import anim_format as af
+from .properties import chosen_version
 from . import skeleton
 
 
@@ -131,11 +132,15 @@ def build_anim(context, options: dict, warnings: list):
     if arm_obj is None:
         raise AnimExportError("Select an armature to export a .anim")
 
-    version = int(options.get("version", "7"))
+    arm_settings = arm_obj.data.rmv2
+    # The version lives on the armature (Object Data Properties > RMV2
+    # (.anim)), which is where it was recorded on import, so the export
+    # dialog has no version field to disagree with it.
+    version = int(chosen_version(
+        options, "version", arm_settings.anim_version or "7"))
     mode = options.get("mode", "ANIMATION")
     scale = options.get("global_scale", 1.0)
 
-    arm_settings = arm_obj.data.rmv2
     skeleton_name = options.get("skeleton_name") \
         or arm_settings.skeleton_name \
         or arm_obj.name

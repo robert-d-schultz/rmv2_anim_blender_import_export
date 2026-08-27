@@ -34,8 +34,10 @@ import os
 
 import numpy as np
 
-from . import export_arm, export_rmv2, skeleton, utils
+from . import capabilities, export_arm, export_rmv2, skeleton, utils
 from . import vwm_format as vf
+from .properties import (chosen_version, root_format_version,
+                         shader_params_or_default)
 
 # The float32 layout resolves far more than this; these are the grids
 # weld_loops keys on, matching the other float32 formats in the add-on.
@@ -210,6 +212,10 @@ def build_model(context, objects, base: str, options, warnings):
               else skeleton.bind_frames_in_game_space(armature, scale))
 
     model = vf.VwmFile(version=int(options.get("version", 1)))
+    # One block for the whole file, so it lives on the root collection -
+    # see export_file, which resolves it before calling in here. Vanilla
+    # sets vary (Empire's line infantry has 13, Napoleon's battle outfit
+    # a different 9), which is why they are kept rather than rebuilt.
     model.float_params = list(options.get("float_params") or
                               _DEFAULT_FLOAT_PARAMS)
     model.vec4_params = list(options.get("vec4_params") or
@@ -291,6 +297,55 @@ _DEFAULT_VEC4_PARAMS = (
 )
 
 
+def ladder_path(filepath: str, level: int) -> str:
+    """`<base>_lod<N>` for one level, from the name the user chose.
+
+    CA numbers these from 1, and the importer shifts them down so the
+    finest is Blender's LOD 0 (import_vwm.split_lod) - so this shifts
+    back. Any `_lodN` the user typed is stripped first, so picking
+    `unit_lod1` and picking `unit` both write the same four files.
+    """
+    from .import_vwm import split_lod
+
+    folder = os.path.dirname(filepath)
+    stem, ext = os.path.splitext(os.path.basename(filepath))
+    base, _ = split_lod(stem)
+    return os.path.join(folder, f"{base}_lod{level + 1}{ext}")
+
+
+def export_ladder(context, filepath: str, options: dict):
+    """Write every LOD of the model, one file each.
+
+    One file is one LOD in this format, and the importer merges a unit's
+    `_lod1`..`_lod4` back into a single model - so exporting only the
+    level in the dialog would silently write a quarter of what was
+    imported. Returns (stats, warnings, [paths]).
+    """
+    _, lods = export_rmv2.gather_lods(context, options)
+    levels = sorted({int(info.get("level", 0)) for info, objs in lods
+                     if objs})
+    if not levels:
+        raise VwmExportError("Nothing to export: no mesh objects found")
+
+    totals = {"meshes": 0, "attachments": 0, "vertices": 0,
+              "triangles": 0, "bytes": 0, "files": 0}
+    warnings: list = []
+    written = []
+    for level in levels:
+        out = (filepath if len(levels) == 1
+               else ladder_path(filepath, level))
+        stats, level_warnings = export_file(
+            context, out,
+            dict(options, lod_level=level, _in_ladder=True))
+        for key in totals:
+            if key in stats:
+                totals[key] += stats[key]
+        totals["files"] += 1
+        warnings += [f"LOD {level}: {w}" for w in level_warnings]
+        written.append(out)
+    return totals, warnings, written
+
+
 def export_file(context, filepath: str, options: dict):
     """Write one .variant_weighted_mesh. Returns (stats, warnings)."""
     warnings: list = []
@@ -307,11 +362,40 @@ def export_file(context, filepath: str, options: dict):
         warnings.append(
             f"No LOD {wanted} in this model; exported LOD "
             f"{lods[0][0].get('level', 0)} instead")
+    elif not options.get("_in_ladder"):
+        # One file is one LOD here, so any other level in the model is
+        # being left behind. Silence made that look like a whole model
+        # had been exported when a quarter of it had. Not while writing
+        # the whole ladder, though - nothing is left behind there.
+        dropped = sorted({int(info.get("level", 0))
+                          for info, objs in lods if objs}
+                         - {wanted})
+        if dropped:
+            warnings.append(
+                "Wrote LOD %d only; this model also has LOD %s. One file "
+                "is one LOD in this format - turn on Write All LODs to "
+                "get the whole ladder"
+                % (wanted, ", ".join(str(d) for d in dropped)))
     if not objects:
         raise VwmExportError("Nothing to export: no mesh objects found")
 
     base = root.name if root is not None else os.path.splitext(
         os.path.basename(filepath))[0]
+    # The version is the model's own; the export dialog has no field for it.
+    options = dict(options, version=chosen_version(
+        options, "version", root_format_version(root, "VWM", "1")))
+    if "float_params" not in options:
+        # gather_lods only reports a root when the user made it the
+        # active collection; exporting from a plain selection leaves it
+        # None, and the file-wide parameter block lives on that root -
+        # so fall back to the root the objects are actually in.
+        owner = root if root is not None else capabilities.root_of(
+            objects[0])
+        if owner is not None:
+            floats, vec4s = shader_params_or_default(
+                owner.rmv2, (_DEFAULT_FLOAT_PARAMS, _DEFAULT_VEC4_PARAMS))
+            options = dict(options, float_params=floats,
+                           vec4_params=vec4s)
     model = build_model(context, objects, base, options, warnings)
 
     data = vf.save(model)

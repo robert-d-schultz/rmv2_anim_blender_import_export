@@ -1,6 +1,7 @@
-"""File > Import / Export operators for .rigid_model_v2, .anim, the
-Shogun 2 rigid models and .variant_part_mesh, and the Empire/Napoleon
-.variant_weighted_mesh and .rigid_model_animation."""
+"""File > Import / Export operators for .rigid_model_v2 and .anim, the
+pre-Rome 2 .animatable_rigid_model / .rigid_model pair, and the unit
+formats .variant_part_mesh, .variant_weighted_mesh and
+.rigid_model_animation."""
 
 from __future__ import annotations
 
@@ -24,48 +25,43 @@ from . import (export_anim, export_arm, export_rma, export_rmv2,
                skeleton)
 from .anim_format import AnimFormatError
 from .arm_format import ArmFormatError
-from .properties import (VERSION_ITEMS, VMPF_VERSION_ITEMS,
-                         VWM_VERSION_ITEMS, get_texture_root)
+from .properties import get_texture_root
 from .rmv2_format import RmvFormatError
 from .vmpf_format import VmpfError
 from .vwm_format import VwmFormatError
 
-ANIM_VERSION_ITEMS = [
-    ("0", "Anim v0 (Shogun 2, headerless)",
-     "Shogun 2's second layout: no version field, three extra floats per "
-     "bone per frame. Only campaign pieces use it - prefer v1"),
-    ("1", "Anim v1 (Shogun 2)", "Shogun 2 era"),
-    ("4", "Anim v4", "Rome 2's first version: UTF-16 strings, and every "
-     "bone stored in every frame as float32"),
-    ("5", "Anim v5", "Rome 2 era, and all but 31 of its animations"),
-    ("6", "Anim v6", "Between Rome 2's v5 and Warhammer 2's v7 - but no vanilla file of any game uses it, so this is written from the versions either side of it and has never met real data"),
-    ("7", "Anim v7", "Warhammer 1/2/3 era (the version AssetEditor and "
-     "the games' modding pipelines expect)"),
-    ("8", "Anim v8", "Warhammer 3 era, and three quarters of its "
-     "animations. Each bone is packed at its own rate; AssetEditor reads "
-     "this version but will not write it"),
-]
 
+def _draw_texture_root(layout, operator, context):
+    """The Texture Root row, plus what will actually be used.
 
-def _prefill_version(operator, context, prop: str, items) -> None:
-    """Set an export operator's version from the model's own.
-
-    The importers record what they read on the root collection, so
-    re-exporting a file keeps its version unless the user says
-    otherwise.  Blender keeps operator properties between invocations,
-    so this runs on every invoke rather than only when unset - the same
-    trap the RMV2 exporter documents.
+    The field is a per-import *override* and is empty by default, at
+    which point the add-on preference is used instead - which looked
+    exactly like nothing was configured at all. So when it is empty, say
+    what the preference resolves to, or where to go and set one.
     """
-    root, _ = export_rmv2.gather_lods(context, {"source": "AUTO"})
-    if root is None or not root.rmv2.is_rmv2_root:
+    layout.prop(operator, "texture_root")
+    if operator.texture_root:
         return
-    value = str(getattr(root.rmv2, prop))
-    if value in {item[0] for item in items}:
-        setattr(operator, prop, value)
+    preference = get_texture_root(context)
+    if preference:
+        layout.label(text="Empty: using preference %s" % preference,
+                     icon="INFO")
+    else:
+        layout.label(text="No Texture Root set - no textures will load",
+                     icon="ERROR")
+        layout.label(text="Set one in Preferences > Add-ons > Total War "
+                          "Model")
 
 
 class IMPORT_SCENE_OT_rmv2(bpy.types.Operator, ImportHelper):
-    """Import a Total War RigidModel (.rigid_model_v2)"""
+    """Import a Total War RigidModel v2 (.rigid_model_v2) - meshes, LODs
+    and materials. Rome 2 to Pharaoh, and Shogun 2's versions 1 - 3.
+
+    With an armature selected the meshes bind to it and their vertex
+    groups get real bone names; without one they arrive as bone_<i> and a
+    later .anim import renames them retroactively, and welds any piece
+    that rides a single bone to it. The skeleton the file asks for is
+    kept on the root collection"""
     bl_idname = "import_scene.rmv2"
     bl_label = "Import RigidModel v2"
     bl_options = {"REGISTER", "UNDO"}
@@ -92,9 +88,11 @@ class IMPORT_SCENE_OT_rmv2(bpy.types.Operator, ImportHelper):
         "file's textures",
         default=True)
     texture_root: StringProperty(
-        name="Texture Root",
-        description="Folder with extracted game textures (overrides the "
-        "add-on preference)",
+        name="Texture Root Override",
+        description="Folder with extracted game textures, for this "
+        "import only. Leave empty to use the add-on preference "
+        "(Preferences > Add-ons > Total War Model), which is where to "
+        "set it once for good",
         default="", subtype="DIR_PATH")
     create_attach_empties: BoolProperty(
         name="Attachment Point Empties",
@@ -116,7 +114,7 @@ class IMPORT_SCENE_OT_rmv2(bpy.types.Operator, ImportHelper):
         layout.prop(self, "global_scale")
         layout.prop(self, "build_materials")
         if self.build_materials:
-            layout.prop(self, "texture_root")
+            _draw_texture_root(layout, self, context)
         layout.prop(self, "create_attach_empties")
         layout.prop(self, "attach_armature")
 
@@ -168,7 +166,14 @@ class IMPORT_SCENE_OT_rmv2(bpy.types.Operator, ImportHelper):
 
 
 class EXPORT_SCENE_OT_rmv2(bpy.types.Operator, ExportHelper):
-    """Export a Total War RigidModel (.rigid_model_v2)"""
+    """Export a Total War RigidModel v2 (.rigid_model_v2) - meshes, LODs
+    and materials. Rome 2 to Pharaoh, and Shogun 2's versions 1 - 3.
+
+    Writes the active model's root collection with its LOD ladder, or
+    the selection. The version comes from the collection's own Version
+    setting rather than from this dialog, so change it there to write a
+    model out for a different game - and a batch export can write each
+    collection as its own version"""
     bl_idname = "export_scene.rmv2"
     bl_label = "Export RigidModel v2"
     bl_options = {"REGISTER"}
@@ -193,7 +198,6 @@ class EXPORT_SCENE_OT_rmv2(bpy.types.Operator, ExportHelper):
                 "file, named after the collection, into the chosen "
                 "folder")],
         default="AUTO")
-    version: EnumProperty(name="Version", items=VERSION_ITEMS, default="7")
     skeleton_name: StringProperty(
         name="Skeleton", default="",
         description="Skeleton name for the file header (e.g. humanoid01). "
@@ -233,7 +237,6 @@ class EXPORT_SCENE_OT_rmv2(bpy.types.Operator, ExportHelper):
         # than only filling it in when empty.
         root, _ = export_rmv2.gather_lods(context, {"source": "AUTO"})
         if root is not None and root.rmv2.is_rmv2_root:
-            self.version = root.rmv2.version
             self.skeleton_name = root.rmv2.skeleton_name
             directory = os.path.dirname(self.filepath) if self.filepath \
                 else ""
@@ -250,7 +253,6 @@ class EXPORT_SCENE_OT_rmv2(bpy.types.Operator, ExportHelper):
             layout.label(
                 text="One file per collection, into the chosen folder",
                 icon="INFO")
-        layout.prop(self, "version")
         if self.source != "BATCH":
             layout.prop(self, "skeleton_name")
         layout.prop(self, "auto_lods")
@@ -262,7 +264,6 @@ class EXPORT_SCENE_OT_rmv2(bpy.types.Operator, ExportHelper):
     def execute(self, context):
         options = {
             "source": self.source,
-            "version": self.version,
             "skeleton_name": self.skeleton_name,
             "auto_lods": self.auto_lods,
             "auto_lod_count": self.auto_lod_count,
@@ -352,14 +353,15 @@ def _run_anim_import(operator, context, options: dict):
 
 
 class IMPORT_SCENE_OT_tw_anim(bpy.types.Operator, ImportHelper):
-    """Import a Total War animation or bind-pose skeleton (.anim).
+    """Import a Total War Animation or bind-pose skeleton (.anim) - every
+    game.
 
     Builds a fresh armature if the target model doesn't have one yet and
     the file looks like a bind-pose skeleton (skeleton name 'building', or
     2-3 identical frames like animations/skeletons/*.anim); otherwise keys
     the file onto the model's existing armature as an action"""
     bl_idname = "import_scene.tw_anim"
-    bl_label = "Import TW Animation"
+    bl_label = "Import Animation"
     bl_options = {"REGISTER", "UNDO"}
 
     filename_ext = ".anim"
@@ -399,9 +401,16 @@ class IMPORT_SCENE_OT_tw_anim(bpy.types.Operator, ImportHelper):
 
 
 class EXPORT_SCENE_OT_tw_anim(bpy.types.Operator, ExportHelper):
-    """Export a Total War animation or skeleton (.anim)"""
+    """Export a Total War Animation or bind-pose skeleton (.anim) - every
+    game.
+
+    Animation mode samples the selected armature's pose over the scene
+    frame range; Bind Pose mode writes its rest pose as a skeleton file,
+    two identical frames like the vanilla ones. The version comes from
+    the armature (Object Data Properties > Total War Settings) rather
+    than from this dialog"""
     bl_idname = "export_scene.tw_anim"
-    bl_label = "Export TW Animation"
+    bl_label = "Export Animation"
     bl_options = {"REGISTER"}
 
     filename_ext = ".anim"
@@ -415,8 +424,6 @@ class EXPORT_SCENE_OT_tw_anim(bpy.types.Operator, ExportHelper):
                 "Write the armature's rest pose as a skeleton file "
                 "(two identical frames, like the vanilla ones)")],
         default="ANIMATION")
-    version: EnumProperty(
-        name="Version", items=ANIM_VERSION_ITEMS, default="8")
     skeleton_name: StringProperty(
         name="Skeleton", default="",
         description="Skeleton name for the header (e.g. humanoid01). "
@@ -438,9 +445,6 @@ class EXPORT_SCENE_OT_tw_anim(bpy.types.Operator, ExportHelper):
             stored = arm_obj.data.rmv2.skeleton_name
             name = stored or arm_obj.name
             self.skeleton_name = name
-            version = str(arm_obj.data.rmv2.anim_version)
-            if version in {item[0] for item in ANIM_VERSION_ITEMS}:
-                self.version = version
             directory = os.path.dirname(self.filepath) if self.filepath \
                 else ""
             self.filepath = os.path.join(directory, name + self.filename_ext)
@@ -451,7 +455,6 @@ class EXPORT_SCENE_OT_tw_anim(bpy.types.Operator, ExportHelper):
         layout.use_property_split = True
         layout.use_property_decorate = False
         layout.prop(self, "mode")
-        layout.prop(self, "version")
         layout.prop(self, "skeleton_name")
         if self.mode == "ANIMATION":
             layout.prop(self, "frame_rate")
@@ -460,7 +463,6 @@ class EXPORT_SCENE_OT_tw_anim(bpy.types.Operator, ExportHelper):
     def execute(self, context):
         options = {
             "mode": self.mode,
-            "version": self.version,
             "skeleton_name": self.skeleton_name,
             "frame_rate": self.frame_rate,
             "global_scale": self.global_scale,
@@ -486,10 +488,21 @@ class EXPORT_SCENE_OT_tw_anim(bpy.types.Operator, ExportHelper):
 
 
 class IMPORT_SCENE_OT_tw_arm(bpy.types.Operator, ImportHelper):
-    """Import a Shogun 2 rigid model
-    (.animatable_rigid_model, .rigid_model)"""
+    """Import a Total War RigidModel (.animatable_rigid_model,
+    .rigid_model) - jointed props and static geometry. Empire, Napoleon and
+    Shogun 2.
+
+    Both menu rows come here and either opens either form: which one a
+    file is gets read out of the file, not its name, so the rows differ
+    only in what the browser lists first.
+
+    Each object that rides a bone is welded to it with a Child Of
+    constraint - import the .anim before or after, whichever suits: with
+    an armature already there it happens now, without one the bone index
+    is kept and the .anim import does it. One file is one level of
+    detail; the ladder lives in separate _lod1 / _lod2 files"""
     bl_idname = "import_scene.tw_arm"
-    bl_label = "Import Shogun 2 RigidModel"
+    bl_label = "Import RigidModel"
     bl_options = {"REGISTER", "UNDO"}
 
     filename_ext = ".animatable_rigid_model"
@@ -498,8 +511,11 @@ class IMPORT_SCENE_OT_tw_arm(bpy.types.Operator, ImportHelper):
     # look empty. Both short patterns below stay under the limit and
     # between them match the animatable form (which ends in an underscore
     # before "rigid_model") and the plain one.
+    # SKIP_SAVE so a bare invocation (F3 search, drag-and-drop) opens on
+    # both patterns rather than on whichever menu row was used last - the
+    # rows set this explicitly, and an explicit value still wins.
     filter_glob: StringProperty(default="*_rigid_model;*.rigid_model",
-                                options={"HIDDEN"})
+                                options={"HIDDEN", "SKIP_SAVE"})
     files: CollectionProperty(type=bpy.types.OperatorFileListElement,
                               options={"HIDDEN", "SKIP_SAVE"})
     directory: StringProperty(subtype="DIR_PATH",
@@ -511,9 +527,11 @@ class IMPORT_SCENE_OT_tw_arm(bpy.types.Operator, ImportHelper):
         "file's textures",
         default=True)
     texture_root: StringProperty(
-        name="Texture Root",
-        description="Folder with extracted game textures (overrides the "
-        "add-on preference)",
+        name="Texture Root Override",
+        description="Folder with extracted game textures, for this "
+        "import only. Leave empty to use the add-on preference "
+        "(Preferences > Add-ons > Total War Model), which is where to "
+        "set it once for good",
         default="", subtype="DIR_PATH")
     attach_armature: BoolProperty(
         name="Attach To Selected Armature",
@@ -530,7 +548,7 @@ class IMPORT_SCENE_OT_tw_arm(bpy.types.Operator, ImportHelper):
         layout.use_property_decorate = False
         layout.prop(self, "build_materials")
         if self.build_materials:
-            layout.prop(self, "texture_root")
+            _draw_texture_root(layout, self, context)
         layout.prop(self, "attach_armature")
         layout.prop(self, "global_scale")
 
@@ -582,17 +600,22 @@ class IMPORT_SCENE_OT_tw_arm(bpy.types.Operator, ImportHelper):
         return {"FINISHED"}
 
 
-class EXPORT_SCENE_OT_tw_arm(bpy.types.Operator, ExportHelper):
-    """Export a Shogun 2 rigid model
-    (.animatable_rigid_model, .rigid_model)"""
-    bl_idname = "export_scene.tw_arm"
-    bl_label = "Export Shogun 2 RigidModel"
-    bl_options = {"REGISTER"}
+class _ArmExportBase:
+    """The shared half of the two RigidModel export entries.
 
-    filename_ext = ".animatable_rigid_model"
-    # See IMPORT_SCENE_OT_tw_arm for why these patterns are abbreviated.
-    filter_glob: StringProperty(default="*_rigid_model;*.rigid_model",
-                                options={"HIDDEN"})
+    `.animatable_rigid_model` and `.rigid_model` are one container: the
+    same writer produces both, and what separates them is whether each
+    object carries the index of the bone it rides or the file closes with
+    a bounding box.  That is a real choice the user makes, so it gets a
+    menu row each rather than being hidden behind which extension they
+    happened to type.  (Import stays one row: there the two are told
+    apart by looking inside the file, so there is nothing to pick.)
+
+    A plain mixin rather than a base Operator - Blender binds one RNA
+    struct per registered class, and subclassing a registered Operator
+    takes it away from the parent.
+    """
+    bl_options = {"REGISTER"}
 
     source: EnumProperty(
         name="Source",
@@ -602,44 +625,23 @@ class EXPORT_SCENE_OT_tw_arm(bpy.types.Operator, ExportHelper):
                ("SELECTED", "Selected Objects", ""),
                ("VISIBLE", "Visible Objects", "")],
         default="AUTO")
-    arm_version: EnumProperty(
-        name="Version",
-        items=[("5", "Version 5", "The common vanilla object version"),
-               ("4", "Version 4", "Also occurs in vanilla"),
-               ("3", "Version 3",
-                "Shogun 2 era; carries no material parameter block"),
-               ("2", "Version 2",
-                "Three flagged texture names, no ao slot, and no second "
-                "UV set"),
-               ("1", "Version 1 (Empire/Napoleon)",
-                "One unflagged texture name and no second UV set"),
-               ("0", "Headerless (Empire)",
-                "No per-object magic or version, and no vertex colour "
-                "either - one vanilla file uses this")],
-        default="5")
     apply_modifiers: BoolProperty(
         name="Apply Modifiers", default=True,
         description="Export the evaluated mesh")
     global_scale: FloatProperty(
         name="Scale", default=1.0, min=0.0001, max=1000.0)
 
-    def invoke(self, context, event):
-        _prefill_version(self, context, "arm_version", ARM_VERSION_ITEMS)
-        return ExportHelper.invoke(self, context, event)
-
     def draw(self, context):
         layout = self.layout
         layout.use_property_split = True
         layout.use_property_decorate = False
         layout.prop(self, "source")
-        layout.prop(self, "arm_version")
         layout.prop(self, "apply_modifiers")
         layout.prop(self, "global_scale")
 
     def execute(self, context):
         options = {
             "source": self.source,
-            "arm_version": int(self.arm_version),
             "apply_modifiers": self.apply_modifiers,
             "global_scale": self.global_scale,
         }
@@ -664,10 +666,57 @@ class EXPORT_SCENE_OT_tw_arm(bpy.types.Operator, ExportHelper):
         return {"FINISHED"}
 
 
+class EXPORT_SCENE_OT_tw_arm(_ArmExportBase, bpy.types.Operator,
+                             ExportHelper):
+    """Export a Total War Animatable RigidModel (.animatable_rigid_model)
+    - jointed props whose parts ride bones, such as siege engines and
+    ballistae. Empire, Napoleon and Shogun 2.
+
+    Every object is written with the index of the bone it rides, taken
+    from its Child Of constraint. For static geometry use Export >
+    RigidModel (.rigid_model) instead, which leaves that out"""
+    bl_idname = "export_scene.tw_arm"
+    bl_label = "Export Animatable RigidModel"
+
+    filename_ext = ".animatable_rigid_model"
+    # See IMPORT_SCENE_OT_tw_arm for why these patterns are abbreviated.
+    filter_glob: StringProperty(default="*_rigid_model",
+                                options={"HIDDEN"})
+
+
+class EXPORT_SCENE_OT_tw_rigid(_ArmExportBase, bpy.types.Operator,
+                               ExportHelper):
+    """Export a Total War RigidModel (.rigid_model) - static geometry.
+    Empire, Napoleon and Shogun 2.
+
+    The same container as .animatable_rigid_model minus the per-object
+    bone index, closing with a bounding box instead. For props whose
+    parts ride bones use Export > Animatable RigidModel"""
+    bl_idname = "export_scene.tw_rigid"
+    bl_label = "Export RigidModel"
+
+    filename_ext = ".rigid_model"
+    filter_glob: StringProperty(default="*.rigid_model",
+                                options={"HIDDEN"})
+
+
 class IMPORT_SCENE_OT_tw_vmpf(bpy.types.Operator, ImportHelper):
-    """Import a Shogun 2 unit part (.variant_part_mesh)"""
+    """Import a Total War Variant Part Mesh (.variant_part_mesh) - skinned
+    unit parts such as helmets, torsos and saddles. Shogun 2.
+
+    Positions are stored in bone space only, so the part wants its
+    reference skeleton: import the .anim the file names and leave that
+    armature selected. Without one the bind pose is rebuilt from the
+    geometry itself, which is only approximate.
+
+    Rigid parts - equipment, crests, the equipment libraries - are not
+    skinned: each rides one named bone and arrives on a Child Of
+    constraint instead of vertex groups. Several of those mounts
+    (Weapon1..3 on man_shogun) sit at the world origin until an
+    animation moves them, so a prop resting at the origin in the T-pose
+    is correct"""
     bl_idname = "import_scene.tw_vmpf"
-    bl_label = "Import Shogun 2 Variant Part Mesh"
+    bl_label = "Import Variant Part Mesh"
     bl_options = {"REGISTER", "UNDO"}
 
     filename_ext = ".variant_part_mesh"
@@ -757,9 +806,19 @@ class IMPORT_SCENE_OT_tw_vmpf(bpy.types.Operator, ImportHelper):
 
 
 class EXPORT_SCENE_OT_tw_vmpf(bpy.types.Operator, ExportHelper):
-    """Export a Shogun 2 unit part (.variant_part_mesh)"""
+    """Export a Total War Variant Part Mesh (.variant_part_mesh) - skinned
+    unit parts such as helmets, torsos and saddles. Shogun 2.
+
+    Every vertex is written once per influence, in that bone's own space,
+    so the model's armature has to be present to export against: there is
+    no model-space position to fall back on.
+
+    This format's parts are its LOD ladder, so Generate LODs builds one
+    by decimation off the collection's Auto-LOD Override rows, the same
+    as .rigid_model_v2. Not for library files, whose parts are named
+    individually in the file"""
     bl_idname = "export_scene.tw_vmpf"
-    bl_label = "Export Shogun 2 Variant Part Mesh"
+    bl_label = "Export Variant Part Mesh"
     bl_options = {"REGISTER"}
 
     filename_ext = ".variant_part_mesh"
@@ -780,23 +839,31 @@ class EXPORT_SCENE_OT_tw_vmpf(bpy.types.Operator, ExportHelper):
         description="Name of the skeleton this part belongs to, e.g. "
         "man_shogun. Taken from the model's collection when left blank",
         default="")
-    vmpf_version: EnumProperty(
-        name="Version", items=VMPF_VERSION_ITEMS, default="3")
+    auto_lods: BoolProperty(
+        name="Generate LODs (Decimate)", default=False,
+        description="Off: write the LODs as set up by collections. On: "
+        "ignore every LOD collection but the best one and build the "
+        "ladder from it by decimation, using the root collection's "
+        "Auto-LOD Override rows. This format's parts are its LOD "
+        "ladder, the same as .rigid_model_v2's LOD table. Not available "
+        "for library files, whose parts are named individually")
+    auto_lod_count: IntProperty(
+        name="LOD Count", default=4, min=2, max=8,
+        description="How many LODs to generate when the root collection "
+        "has no override rows")
     global_scale: FloatProperty(
         name="Scale", default=1.0, min=0.0001, max=1000.0)
-
-    def invoke(self, context, event):
-        _prefill_version(self, context, "vmpf_version", VMPF_VERSION_ITEMS)
-        return ExportHelper.invoke(self, context, event)
 
     def draw(self, context):
         layout = self.layout
         layout.use_property_split = True
         layout.use_property_decorate = False
         layout.prop(self, "source")
-        layout.prop(self, "vmpf_version")
         layout.prop(self, "apply_modifiers")
         layout.prop(self, "skeleton_name")
+        layout.prop(self, "auto_lods")
+        if self.auto_lods:
+            layout.prop(self, "auto_lod_count")
         layout.prop(self, "global_scale")
 
     def execute(self, context):
@@ -804,9 +871,9 @@ class EXPORT_SCENE_OT_tw_vmpf(bpy.types.Operator, ExportHelper):
             "source": self.source,
             "apply_modifiers": self.apply_modifiers,
             "skeleton_name": self.skeleton_name,
-            "version": self.vmpf_version,
             "global_scale": self.global_scale,
-            "auto_lods": False,
+            "auto_lods": self.auto_lods,
+            "auto_lod_count": self.auto_lod_count,
         }
         try:
             stats, warnings = export_vmpf.export_file(
@@ -829,9 +896,20 @@ class EXPORT_SCENE_OT_tw_vmpf(bpy.types.Operator, ExportHelper):
 
 
 class IMPORT_SCENE_OT_tw_vwm(bpy.types.Operator, ImportHelper):
-    """Import an Empire/Napoleon unit mesh (.variant_weighted_mesh)"""
+    """Import a Total War Variant Weighted Mesh (.variant_weighted_mesh) -
+    skinned units, one file per LOD. Empire and Napoleon.
+
+    Positions are stored in bone space only, so import
+    animations/reference/tpose.anim first and leave its armature selected -
+    every unit in both games is rigged to that one skeleton. Pick all four
+    _lodN files at once and they fill in one model's LOD ladder.
+
+    One file holds every alternative a unit's variants can draw, all in
+    the same place, so One Variant Per Slot leaves the first of each set
+    (head01 of head01..head04) visible and closes the eye on the rest.
+    Nothing is deleted and export writes them all"""
     bl_idname = "import_scene.tw_vwm"
-    bl_label = "Import Empire Unit Mesh"
+    bl_label = "Import Variant Weighted Mesh"
     bl_options = {"REGISTER", "UNDO"}
 
     filename_ext = ".variant_weighted_mesh"
@@ -851,10 +929,21 @@ class IMPORT_SCENE_OT_tw_vwm(bpy.types.Operator, ImportHelper):
         "names none, so they are looked up by convention as "
         "unitmodels/textures/<unit>_diffuse.dds and friends",
         default=True)
+    single_variant: BoolProperty(
+        name="One Variant Per Slot",
+        description="Close the viewport eye on all but the first of each "
+        "set of alternatives (head01..head04, body01/body02), so the "
+        "model opens as one soldier instead of every variant at once. "
+        "The file has no slot field, so parts are grouped by name up to "
+        "a trailing number. Nothing is deleted and export still writes "
+        "them all",
+        default=True)
     texture_root: StringProperty(
-        name="Texture Root",
-        description="Folder with extracted game textures (overrides the "
-        "add-on preference)",
+        name="Texture Root Override",
+        description="Folder with extracted game textures, for this "
+        "import only. Leave empty to use the add-on preference "
+        "(Preferences > Add-ons > Total War Model), which is where to "
+        "set it once for good",
         default="", subtype="DIR_PATH")
     global_scale: FloatProperty(
         name="Scale", default=1.0, min=0.0001, max=1000.0)
@@ -868,12 +957,14 @@ class IMPORT_SCENE_OT_tw_vwm(bpy.types.Operator, ImportHelper):
         layout.label(text=import_vwm.REFERENCE_SKELETON)
         layout.prop(self, "build_materials")
         if self.build_materials:
-            layout.prop(self, "texture_root")
+            _draw_texture_root(layout, self, context)
+        layout.prop(self, "single_variant")
         layout.prop(self, "global_scale")
 
     def execute(self, context):
         options = {
             "build_materials": self.build_materials,
+            "single_variant": self.single_variant,
             "texture_root": self.texture_root or get_texture_root(context),
             "global_scale": self.global_scale,
         }
@@ -892,7 +983,7 @@ class IMPORT_SCENE_OT_tw_vwm(bpy.types.Operator, ImportHelper):
 
         imported = 0
         totals = {"meshes": 0, "vertices": 0, "triangles": 0,
-                  "attachments": 0}
+                  "attachments": 0, "hidden": 0}
         for path in filepaths:
             try:
                 _, stats, warnings = import_vwm.import_file(
@@ -916,18 +1007,27 @@ class IMPORT_SCENE_OT_tw_vwm(bpy.types.Operator, ImportHelper):
             return {"CANCELLED"}
         props = (f", {totals['attachments']} of them attached props"
                  if totals["attachments"] else "")
+        # Say so rather than leaving the user to wonder where the other
+        # half of the part list went.
+        hidden = (f"; {totals['hidden']} spare variant(s) hidden"
+                  if totals["hidden"] else "")
         self.report(
             {"INFO"},
             f"Imported {imported} file(s): {totals['meshes']} parts"
             f"{props}, {totals['vertices']} vertices, "
-            f"{totals['triangles']} triangles")
+            f"{totals['triangles']} triangles{hidden}")
         return {"FINISHED"}
 
 
 class EXPORT_SCENE_OT_tw_vwm(bpy.types.Operator, ExportHelper):
-    """Export an Empire/Napoleon unit mesh (.variant_weighted_mesh)"""
+    """Export a Total War Variant Weighted Mesh (.variant_weighted_mesh) -
+    skinned units, one file per LOD. Empire and Napoleon.
+
+    Every vertex is written once per bone that moves it, in that bone's own
+    space, so the model's armature has to be present to export against:
+    there is no model-space position to fall back on"""
     bl_idname = "export_scene.tw_vwm"
-    bl_label = "Export Empire Unit Mesh"
+    bl_label = "Export Variant Weighted Mesh"
     bl_options = {"REGISTER"}
 
     filename_ext = ".variant_weighted_mesh"
@@ -939,13 +1039,17 @@ class EXPORT_SCENE_OT_tw_vwm(bpy.types.Operator, ExportHelper):
         items=[("AUTO", "Active Model", "The active model's LOD ladder"),
                ("SELECTED", "Selected Objects", "Selected meshes only")],
         default="AUTO")
-    vwm_version: EnumProperty(
-        name="Version", items=VWM_VERSION_ITEMS, default="1")
+    all_lods: BoolProperty(
+        name="Write All LODs",
+        description="Write every LOD collection in the model, one file "
+        "each, named <unit>_lod1 to <unit>_lod4 the way CA does. One "
+        "file is one LOD in this format, so with this off only the level "
+        "below is written and the rest of the model is left behind",
+        default=True)
     lod_level: IntProperty(
         name="LOD Level",
-        description="Which level to write. One file is one LOD in this "
-        "format, so a full ladder is four exports (CA names them "
-        "<unit>_lod1 to <unit>_lod4)",
+        description="Which level to write when Write All LODs is off. "
+        "Blender's LOD 0 is CA's <unit>_lod1",
         default=0, min=0, max=7)
     apply_modifiers: BoolProperty(
         name="Apply Modifiers",
@@ -955,17 +1059,14 @@ class EXPORT_SCENE_OT_tw_vwm(bpy.types.Operator, ExportHelper):
     global_scale: FloatProperty(
         name="Scale", default=1.0, min=0.0001, max=1000.0)
 
-    def invoke(self, context, event):
-        _prefill_version(self, context, "vwm_version", VWM_VERSION_ITEMS)
-        return ExportHelper.invoke(self, context, event)
-
     def draw(self, context):
         layout = self.layout
         layout.use_property_split = True
         layout.use_property_decorate = False
         layout.prop(self, "source")
-        layout.prop(self, "vwm_version")
-        layout.prop(self, "lod_level")
+        layout.prop(self, "all_lods")
+        if not self.all_lods:
+            layout.prop(self, "lod_level")
         layout.prop(self, "apply_modifiers")
         layout.prop(self, "global_scale")
 
@@ -973,14 +1074,18 @@ class EXPORT_SCENE_OT_tw_vwm(bpy.types.Operator, ExportHelper):
         options = {
             "source": self.source,
             "lod_level": self.lod_level,
-            "version": self.vwm_version,
             "apply_modifiers": self.apply_modifiers,
             "global_scale": self.global_scale,
             "auto_lods": False,
         }
+        written = []
         try:
-            stats, warnings = export_vwm.export_file(
-                context, self.filepath, options)
+            if self.all_lods:
+                stats, warnings, written = export_vwm.export_ladder(
+                    context, self.filepath, options)
+            else:
+                stats, warnings = export_vwm.export_file(
+                    context, self.filepath, options)
         except (VwmFormatError, export_vwm.VwmExportError) as exc:
             self.report({"ERROR"}, str(exc))
             return {"CANCELLED"}
@@ -992,18 +1097,26 @@ class EXPORT_SCENE_OT_tw_vwm(bpy.types.Operator, ExportHelper):
             self.report({"WARNING"}, warning)
         props = (f" ({stats['attachments']} attached props)"
                  if stats["attachments"] else "")
+        files = (f"{len(written)} files: "
+                 + ", ".join(os.path.basename(p) for p in written) + " - "
+                 if len(written) > 1 else "")
         self.report(
             {"INFO"},
-            f"Exported {stats['meshes']} parts{props}, "
+            f"Exported {files}{stats['meshes']} parts{props}, "
             f"{stats['vertices']} vertices, {stats['triangles']} "
             f"triangles ({stats['bytes']:,} bytes)")
         return {"FINISHED"}
 
 
 class IMPORT_SCENE_OT_tw_rma(bpy.types.Operator, ImportHelper):
-    """Import an animated rigid model (.rigid_model_animation)"""
+    """Import a Total War RigidModel Animation (.rigid_model_animation) -
+    an object list with its own embedded animation. Empire and Napoleon.
+
+    The skeleton travels inside the file, so there is nothing to import
+    first: the armature is built here, the animation arrives as an action
+    on it, and each object is welded to the bone it rides"""
     bl_idname = "import_scene.tw_rma"
-    bl_label = "Import Animated RigidModel"
+    bl_label = "Import RigidModel Animation"
     bl_options = {"REGISTER", "UNDO"}
 
     filename_ext = ".rigid_model_animation"
@@ -1022,9 +1135,11 @@ class IMPORT_SCENE_OT_tw_rma(bpy.types.Operator, ImportHelper):
         "file's textures",
         default=True)
     texture_root: StringProperty(
-        name="Texture Root",
-        description="Folder with extracted game textures (overrides the "
-        "add-on preference)",
+        name="Texture Root Override",
+        description="Folder with extracted game textures, for this "
+        "import only. Leave empty to use the add-on preference "
+        "(Preferences > Add-ons > Total War Model), which is where to "
+        "set it once for good",
         default="", subtype="DIR_PATH")
     global_scale: FloatProperty(
         name="Scale", default=1.0, min=0.0001, max=1000.0)
@@ -1035,7 +1150,7 @@ class IMPORT_SCENE_OT_tw_rma(bpy.types.Operator, ImportHelper):
         layout.use_property_decorate = False
         layout.prop(self, "build_materials")
         if self.build_materials:
-            layout.prop(self, "texture_root")
+            _draw_texture_root(layout, self, context)
         layout.prop(self, "global_scale")
 
     def execute(self, context):
@@ -1086,9 +1201,14 @@ class IMPORT_SCENE_OT_tw_rma(bpy.types.Operator, ImportHelper):
 
 
 class EXPORT_SCENE_OT_tw_rma(bpy.types.Operator, ExportHelper):
-    """Export an animated rigid model (.rigid_model_animation)"""
+    """Export a Total War RigidModel Animation (.rigid_model_animation) -
+    an object list with its own embedded animation. Empire and Napoleon.
+
+    The objects and a whole headerless .anim go into the one file, so the
+    model's armature has to be present to export against: select it, or
+    make the model's collection active"""
     bl_idname = "export_scene.tw_rma"
-    bl_label = "Export Animated RigidModel"
+    bl_label = "Export RigidModel Animation"
     bl_options = {"REGISTER"}
 
     filename_ext = ".rigid_model_animation"
@@ -1154,42 +1274,73 @@ class EXPORT_SCENE_OT_tw_rma(bpy.types.Operator, ExportHelper):
         return {"FINISHED"}
 
 
+# The four formats that only Empire, Napoleon and Shogun 2 use get a
+# submenu of their own, so File > Import stays two rows longer rather
+# than six. Inside it the rows drop the "Total War" prefix - the parent
+# row carries it - and otherwise read exactly as they do at top level.
+LEGACY_MENU_LABEL = "Total War, pre-Rome 2"
+
+
+class TOPBAR_MT_tw_legacy_import(bpy.types.Menu):
+    """Import an Empire, Napoleon or Shogun 2 format"""
+    bl_idname = "TOPBAR_MT_tw_legacy_import"
+    bl_label = LEGACY_MENU_LABEL
+
+    def draw(self, context):
+        layout = self.layout
+        row = layout.operator(
+            IMPORT_SCENE_OT_tw_arm.bl_idname,
+            text="Animatable RigidModel (.animatable_rigid_model)")
+        row.filter_glob = "*_rigid_model"
+        row = layout.operator(IMPORT_SCENE_OT_tw_arm.bl_idname,
+                              text="RigidModel (.rigid_model)")
+        row.filter_glob = "*.rigid_model"
+        layout.operator(IMPORT_SCENE_OT_tw_vmpf.bl_idname,
+                        text="Variant Part Mesh (.variant_part_mesh)")
+        layout.operator(IMPORT_SCENE_OT_tw_vwm.bl_idname,
+                        text="Variant Weighted Mesh "
+                             "(.variant_weighted_mesh)")
+        layout.operator(IMPORT_SCENE_OT_tw_rma.bl_idname,
+                        text="RigidModel Animation "
+                             "(.rigid_model_animation)")
+
+
+class TOPBAR_MT_tw_legacy_export(bpy.types.Menu):
+    """Export an Empire, Napoleon or Shogun 2 format"""
+    bl_idname = "TOPBAR_MT_tw_legacy_export"
+    bl_label = LEGACY_MENU_LABEL
+
+    def draw(self, context):
+        layout = self.layout
+        layout.operator(EXPORT_SCENE_OT_tw_arm.bl_idname,
+                        text="Animatable RigidModel "
+                             "(.animatable_rigid_model)")
+        layout.operator(EXPORT_SCENE_OT_tw_rigid.bl_idname,
+                        text="RigidModel (.rigid_model)")
+        layout.operator(EXPORT_SCENE_OT_tw_vmpf.bl_idname,
+                        text="Variant Part Mesh (.variant_part_mesh)")
+        layout.operator(EXPORT_SCENE_OT_tw_vwm.bl_idname,
+                        text="Variant Weighted Mesh "
+                             "(.variant_weighted_mesh)")
+        layout.operator(EXPORT_SCENE_OT_tw_rma.bl_idname,
+                        text="RigidModel Animation "
+                             "(.rigid_model_animation)")
+
+
 def menu_import(self, context):
     self.layout.operator(IMPORT_SCENE_OT_rmv2.bl_idname,
-                         text="Total War RigidModel (.rigid_model_v2)")
-    self.layout.operator(IMPORT_SCENE_OT_tw_arm.bl_idname,
-                         text="Total War Shogun 2 RigidModel "
-                              "(.animatable_rigid_model, .rigid_model)")
-    self.layout.operator(IMPORT_SCENE_OT_tw_vmpf.bl_idname,
-                         text="Total War Shogun 2 Unit Part "
-                              "(.variant_part_mesh)")
-    self.layout.operator(IMPORT_SCENE_OT_tw_vwm.bl_idname,
-                         text="Total War Empire Unit Mesh "
-                              "(.variant_weighted_mesh)")
-    self.layout.operator(IMPORT_SCENE_OT_tw_rma.bl_idname,
-                         text="Total War Animated RigidModel "
-                              "(.rigid_model_animation)")
+                         text="Total War RigidModel v2 (.rigid_model_v2)")
     self.layout.operator(IMPORT_SCENE_OT_tw_anim.bl_idname,
                          text="Total War Animation (.anim)")
+    self.layout.menu(TOPBAR_MT_tw_legacy_import.bl_idname)
 
 
 def menu_export(self, context):
     self.layout.operator(EXPORT_SCENE_OT_rmv2.bl_idname,
-                         text="Total War RigidModel (.rigid_model_v2)")
-    self.layout.operator(EXPORT_SCENE_OT_tw_arm.bl_idname,
-                         text="Total War Shogun 2 RigidModel "
-                              "(.animatable_rigid_model, .rigid_model)")
-    self.layout.operator(EXPORT_SCENE_OT_tw_vmpf.bl_idname,
-                         text="Total War Shogun 2 Unit Part "
-                              "(.variant_part_mesh)")
-    self.layout.operator(EXPORT_SCENE_OT_tw_vwm.bl_idname,
-                         text="Total War Empire Unit Mesh "
-                              "(.variant_weighted_mesh)")
-    self.layout.operator(EXPORT_SCENE_OT_tw_rma.bl_idname,
-                         text="Total War Animated RigidModel "
-                              "(.rigid_model_animation)")
+                         text="Total War RigidModel v2 (.rigid_model_v2)")
     self.layout.operator(EXPORT_SCENE_OT_tw_anim.bl_idname,
                          text="Total War Animation (.anim)")
+    self.layout.menu(TOPBAR_MT_tw_legacy_export.bl_idname)
 
 
 CLASSES = (
@@ -1197,6 +1348,7 @@ CLASSES = (
     EXPORT_SCENE_OT_rmv2,
     IMPORT_SCENE_OT_tw_arm,
     EXPORT_SCENE_OT_tw_arm,
+    EXPORT_SCENE_OT_tw_rigid,
     IMPORT_SCENE_OT_tw_vmpf,
     EXPORT_SCENE_OT_tw_vmpf,
     IMPORT_SCENE_OT_tw_vwm,
@@ -1205,6 +1357,8 @@ CLASSES = (
     EXPORT_SCENE_OT_tw_rma,
     IMPORT_SCENE_OT_tw_anim,
     EXPORT_SCENE_OT_tw_anim,
+    TOPBAR_MT_tw_legacy_import,
+    TOPBAR_MT_tw_legacy_export,
 )
 
 

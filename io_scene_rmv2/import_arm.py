@@ -14,7 +14,7 @@ The scene layout mirrors the .rigid_model_v2 importer so the two feel the
 same and the RMV2 panels keep working:
 
     <name>              collection, rmv2.is_rmv2_root
-      <name>_lod0       collection, rmv2.is_lod
+      <name>_lod0       collection (any child of a root is a LOD)
         <object>        mesh objects, one per file object
 
 Each object is bound to its bone with a Child Of constraint (the same
@@ -35,6 +35,7 @@ import numpy as np
 
 from . import arm_format as armf
 from . import materials, mesh_build, scene_layout, skeleton, utils
+from .properties import fill_shader_params, set_format_version
 
 
 class ArmImportError(Exception):
@@ -83,6 +84,11 @@ def _fill_settings(obj, mesh: armf.ArmMesh, index: int):
     s.model_name = _mesh_name(mesh, index)[:31]
     s.matrix_index = -1 if mesh.bone_index is None else mesh.bone_index
     s.textures_initialized = True
+    # Per object, not per file: three of naval_cannon_12lb_lod4's four
+    # objects carry 13 parameters and the fourth carries none. Filling
+    # it even when empty is what keeps that fourth object empty on the
+    # way back out - see properties.fill_shader_params.
+    fill_shader_params(s, mesh.float_params, mesh.vec4_params)
     for slot_name, path in zip(armf.TEXTURE_SLOTS, mesh.textures):
         if not path:
             continue
@@ -99,6 +105,33 @@ _TEXTURE_TYPE_BY_SLOT = {
 }
 
 
+def _skeleton_name_for(arm, filepath: str, stem: str,
+                       warnings: list) -> str:
+    """The skeleton this model rides, or "" - never a guess.
+
+    Nothing in either format names a skeleton, so there are only two
+    honest answers. A plain `.rigid_model` has no bone index on any
+    object, which is the whole of what "not animatable" means: it is
+    scenery, and it rides nothing. An animatable one does ride a
+    skeleton, but the file does not say which, and CA's convention is an
+    `.anim` of the same name beside it - so that is used only when the
+    file is actually there to be checked.
+
+    Filling it in regardless put "mountainb.anim" on a Napoleon campaign
+    mountain, which has no bones at all.
+    """
+    if all(mesh.bone_index is None for mesh in arm.meshes):
+        return ""
+    sibling = os.path.join(os.path.dirname(filepath), stem + ".anim")
+    if os.path.isfile(sibling):
+        return stem + ".anim"
+    warnings.append(
+        f"{stem}: this format does not name its skeleton, and no "
+        f"'{stem}.anim' sits beside it. Set Skeleton on the model "
+        "collection if you know which one it rides")
+    return ""
+
+
 def import_file(context, filepath: str, options: dict):
     """Import one .animatable_rigid_model. Returns (root_collection, stats).
     """
@@ -110,10 +143,9 @@ def import_file(context, filepath: str, options: dict):
     stem = os.path.splitext(os.path.basename(filepath))[0]
     scale = options.get("global_scale", 1.0)
 
-    # An ARM file has no header naming its skeleton; by convention the
-    # .anim sits beside it under the model's own name.
-    root = scene_layout.new_root(context, stem, stem + ".anim")
-    root.rmv2.arm_version = arm.version
+    root = scene_layout.new_root(
+        context, stem, _skeleton_name_for(arm, filepath, stem, warnings))
+    set_format_version(root.rmv2, "ARM", arm.version)
     lod = scene_layout.new_lod(root, f"{stem}_lod0", 0)
 
     armature = None

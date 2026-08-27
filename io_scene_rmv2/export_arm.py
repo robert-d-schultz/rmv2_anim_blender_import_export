@@ -22,6 +22,8 @@ import numpy as np
 
 from . import arm_format as armf
 from . import export_rmv2, skeleton
+from .properties import (chosen_version, root_format_version,
+                         shader_params_or_default)
 
 
 class ArmExportError(Exception):
@@ -35,16 +37,20 @@ _POSITION_GRID = 1e5
 _UV_GRID = 1e5
 
 
-def _gather_objects(context, options: dict) -> list:
-    """The mesh objects to write, in a stable order."""
+def _gather_objects(context, options: dict) -> tuple:
+    """(root collection or None, the mesh objects to write).
+
+    The root comes back too because it is where the object version is
+    recorded - see export_file.
+    """
     source = options.get("source", "AUTO")
+    root, lods = export_rmv2.gather_lods(context, {"source": "AUTO"})
     if source == "SELECTED":
         objects = [o for o in context.selected_objects if o.type == "MESH"]
     elif source == "VISIBLE":
         objects = [o for o in context.view_layer.objects
                    if o.type == "MESH" and o.visible_get()]
     else:
-        root, lods = export_rmv2.gather_lods(context, {"source": "AUTO"})
         objects = []
         if lods:
             # An ARM file has no LOD tree of its own - one file is one LOD,
@@ -54,7 +60,7 @@ def _gather_objects(context, options: dict) -> list:
         if not objects:
             objects = [o for o in context.selected_objects
                        if o.type == "MESH"]
-    return sorted(objects, key=lambda o: o.name)
+    return root, sorted(objects, key=lambda o: o.name)
 
 
 def _bone_index(obj, armature, animatable: bool):
@@ -102,11 +108,15 @@ def _build_mesh(context, obj, options, warnings) -> armf.ArmMesh | None:
         mesh.uv1 = welded["uv1"]
         mesh.indices = welded["indices"].astype(np.uint32)
 
-        # Version 3 has no material parameter block to put these in.
+        # Version 3 and below have no parameter block to put these in.
         if mesh.version >= armf._PARAMS_FROM_VERSION:
-            floats, vec4s = armf.default_params()
-            mesh.float_params = floats
-            mesh.vec4_params = vec4s
+            mesh.float_params, mesh.vec4_params = shader_params_or_default(
+                obj.rmv2, armf.default_params())
+        elif obj.rmv2.shader_params:
+            warnings.append(
+                f"{obj.name}: object version {mesh.version} has no "
+                f"parameter block, so its {len(obj.rmv2.shader_params)} "
+                "shader parameter(s) were not written")
         slot_count, _ = armf.texture_layout(mesh.version)
         keep = armf.TEXTURE_SLOTS[:slot_count]
         dropped = []
@@ -150,11 +160,15 @@ def _textures_for(obj):
 def export_file(context, filepath: str, options: dict):
     """Export to filepath. Returns (stats, warnings)."""
     warnings: list[str] = []
-    objects = _gather_objects(context, options)
+    root, objects = _gather_objects(context, options)
     if not objects:
         raise ArmExportError(
             "Nothing to export: select the mesh objects, or make the "
             "model's collection active")
+    # The version is the model's own, off the root collection; the export
+    # dialog has no field for it.
+    options = dict(options, arm_version=int(chosen_version(
+        options, "arm_version", root_format_version(root, "ARM", "5"))))
 
     # A plain .rigid_model has no per-object bone index and closes with a
     # bounding box; the animatable form is the other way round. The file

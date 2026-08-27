@@ -75,6 +75,62 @@ Warhammers, Warhammer 3 and Pharaoh.
 
 ## Investigations
 
+### 3b. What a good LOD ladder looks like, per game
+
+The auto-LOD override list still opens on four rows for every version,
+and `export_rmv2.default_camera_distance` still has to invent the
+distances after the ones the sample files show.
+
+What the 36 sample files do say is that the ladder length is a property
+of the *model*, not the game: `maple_d` (Rome 2, v6) has four levels,
+`pig` (Three Kingdoms, v8) has two, and most single-mesh props have one.
+So the four rows are a decimator default, not a format limit, and
+nothing is currently wrong. What they also say is that the *shape*
+splits at v7, which is now implemented: before v7 the ladder is
+100/200/400 with 500 on a fourth level (`maple_d`, `shrubc_b`,
+`grass_rome_atlantic_agri`, `terrain_tile_farmland`); from v7 the last
+level is a cutoff in the thousands instead (`chs_warhorse_lowlod`
+180/10000, `belt_fabric_03` 10/20/30/10000,
+`wh_ksl_birchtree_totem_f` 500/600/5000).
+
+Thirty-six files is not a corpus. What would settle it: sweep each
+game's packs for LOD count, camera distance and quality level per RMV2
+version, split by model kind (unit, building, vegetation, prop), and see
+whether a per-game or per-kind default falls out that beats one flat set
+of four rows. Same question for `.variant_part_mesh`, whose parts are
+its ladder. Until then the defaults are a starting point the user is
+expected to edit, which the panel says.
+
+### 3c. Parent matrix index — answered for Warhammer 3
+
+**Solved there, and written up in FORMATS.md**: it is the bone a
+cloth-physics collider proxy follows. All 23 618 vanilla Warhammer 3
+models were swept (packs from the game's own `manifest.txt`, extracted
+with RPFM, no parse failures); 81 meshes set it, every one a
+`collider_*` mesh in one of six `*_cloth_cloak_01` files, and the 58
+named after a body part all name exactly the bone their value points
+at. Their own matrix index is `-1`, which kills the "parent of the bone
+this mesh rides" reading.
+
+The panel offers it again as **Collider Bone**.
+
+What is left: the same sweep on the other games. Warhammer 3 is one
+engine generation; whether Rome 2 and Attila used the field the same
+way, or at all, is unchecked - the 36-file sample set has it at `-1`
+everywhere, which is consistent with "only cloth cloaks use it" but
+proves nothing on its own. Three Kingdoms is installed and would be the
+cheapest next one.
+
+The tooling is now in [tools/](../tools/), and corpus work goes through
+RPFM's CLI rather than a pack reader of our own - see
+[tools/README.md](../tools/README.md) for why, and for the two ways a
+sweep silently produced wrong numbers before that rule and the vanilla
+filter were in place. Re-running this one is:
+
+```
+python tools/sweep_field.py parent_matrix_index three_kingdoms "<install>"
+```
+
 ### 4. The LOD-header marker bytes
 
 `rmv2_format.EXPORT_SIGNATURE` stamps `'R', 'b', 0x00` over three bytes
@@ -424,3 +480,69 @@ numbers - a stiffness, a phase, an amplitude.
   through the Shogun 2 writer, which puts vertices in bone space. That
   is right for Shogun 2 and merely consistent for v3; no v3 file has
   been round-tripped through Blender and loaded by Rome 2.
+
+### 8. RMV2's own parameter lists have no UI
+
+The named parameter blocks of `.animatable_rigid_model`,
+`.variant_part_mesh` and `.variant_weighted_mesh` are now an editable
+list in the panel each container puts them in (see
+[FORMATS.md](FORMATS.md#the-named-parameter-block)).
+`.rigid_model_v2` is the one left out, and for a reason: it addresses
+its parameters by *index* rather than by name, and only five indices
+have a known meaning — float 0 and 1 are the UV scale, int 0 is the
+alpha mode (already its own field), int 1 decal, int 2 dirt, vec4 0 the
+decal transform. The rest are read and written back unchanged inside
+`extra_json`.
+
+Surfacing them means naming the indices, and naming an index without
+knowing what it does is how "parent matrix index" got mis-described in
+the first place (3c above). The cheap half is worth doing on its own:
+float 0/1 are the UV scale, which is a real thing to want to edit, and
+they could be a **UV Scale** field on the mesh panel without touching
+the unknown ones. The rest wants a corpus sweep of which indices
+actually occur, per game, before any of them gets a label.
+
+### 9. Which vertex formats go with which version
+
+The Vertex Format dropdown is narrowed by **container** — an RMV2 mesh
+sees the RMV2 layouts, a `.variant_part_mesh` mesh sees only its own
+three — and deliberately not by version, because nothing yet says what a
+version-level rule would be. The samples actively argue against the
+obvious guess:
+
+| File | Version | Format |
+| --- | --- | --- |
+| `zen_garden_floor_stone_01` | v1 | `Static` |
+| `compoundwall_v2_wood_low_endcap` | v2 | `Static` |
+| `shrub_pine_a` | v3 | `Vegetation` |
+| `army_banner_flag_general` | v7 | `Shogun2_Static` |
+
+So the `S2_*` entries are not a Shogun-2-era set and the modern ones are
+not a modern-era set — each appears on the wrong side. That is why an
+RMV2 v8 model still lists the Shogun 2 layouts today: not because it is
+right, but because there is no evidence yet for where to draw the line.
+
+**What is needed** is a per-game census: for every vanilla
+`.rigid_model_v2`, the (version, vertex format) pair, counted. That gives
+the real table, and any pair with a healthy count is a pair the dropdown
+should offer at that version. A pair that never occurs is a candidate for
+hiding — though "never occurs in this game" is weaker than "the format
+cannot hold it", so the honest outcome may be sorting the list with the
+unlikely ones last rather than removing them.
+
+Warhammer 3 is the only game currently installed, and it only covers v7
+and v8. The interesting versions are the old ones, so this wants Shogun 2
+(v1–v3), Rome 2 (v5/v6) and Attila back on the disk — see
+[CORPUS.md](CORPUS.md), which notes that games come and go as each is
+swept.
+
+The tooling is already there: `tools/corpus.py` iterates a game's vanilla
+models, and this is a two-counter loop over `model.version` and
+`entry.material.vertex_format`. Worth adding to `tools/` as a real script
+once more than one game is available to run it against.
+
+Related: the same sweep answers whether a *file* mixes formats, which it
+does — `belt_fabric_03` is Cinematic plus Weighted, `maple_d` is
+Vegetation plus one Tree Billboard card, and Warhammer 3 routinely drops
+a Cinematic mesh to Weighted for its distant LOD. That is settled and is
+why the setting is per mesh.

@@ -25,7 +25,8 @@ from . import mesh_build
 from . import rmv2_format as rf
 from . import skeleton
 from . import utils
-from .properties import VERTEX_FORMAT_TO_INT
+from .properties import (VERTEX_FORMAT_TO_INT, chosen_version,
+                         root_format_version)
 
 _BONE_PATTERN = re.compile(r"^bone_(\d+)$")
 
@@ -42,10 +43,12 @@ _LOD_NAME_PATTERN = re.compile(r"lod\s*_?(\d+)", re.IGNORECASE)
 
 
 def _mesh_objects(collection, recursive=True):
+    from . import capabilities
+
     objs = [o for o in collection.objects if o.type == "MESH"]
     if recursive:
         for child in collection.children:
-            if child.rmv2.is_lod:
+            if capabilities.is_lod(child):
                 continue
             objs += _mesh_objects(child)
     # preserve order, drop duplicates
@@ -70,24 +73,64 @@ def _find_parent_collection(scene, target):
 
 
 def _lod_children(root):
-    """Child collections that look like LODs, sorted by level."""
+    """[(level, collection)] for a root's LODs, sorted by level.
+
+    Every child of a model root is one of its LODs - that is what being
+    inside a root means, and there is no separate flag to disagree with
+    (see capabilities.parent_root_of). The exception is a child that is a
+    model root itself, which is its own file rather than a level of this
+    one.
+
+    The level is the collection's own LOD Level, falling back to a number
+    in its name while that is still 0 - so a ladder built by hand as
+    `<model>/<model>_lod0..3` works without anyone opening the panel.
+    """
     lods = []
     for child in root.children:
-        level = None
-        if child.rmv2.is_lod:
-            level = child.rmv2.lod_level
-        else:
-            m = _LOD_NAME_PATTERN.search(child.name)
-            if m:
-                level = int(m.group(1))
-        if level is not None:
-            lods.append((level, child))
+        if child.rmv2.is_rmv2_root:
+            continue
+        level = child.rmv2.lod_level
+        if not level:
+            match = _LOD_NAME_PATTERN.search(child.name)
+            if match:
+                level = int(match.group(1))
+        lods.append((level, child))
     lods.sort(key=lambda item: (item[0], item[1].name))
-    return [c for _, c in lods]
+    return lods
 
 
-def default_camera_distance(index: int) -> float:
-    return float(20 * (2 ** index))
+# The distances vanilla files actually use, which turn out to split at
+# the same place the LOD header does. In the v5/v6 sample files the
+# ladder is 100/200/400 with 500 on a fourth level (maple_d, shrubc_b,
+# grass_rome_atlantic_agri, terrain_tile_farmland); from v7 the last
+# level is instead a "never cull this" cutoff in the thousands
+# (chs_warhorse_lowlod 180/10000, belt_fabric_03 10/20/30/10000,
+# wh_ksl_birchtree_totem_f 500/600/5000).
+_CAMERA_DISTANCES_PRE_V7 = (100.0, 200.0, 400.0, 500.0)
+_CAMERA_DISTANCES_V7 = (100.0, 200.0, 400.0)
+_FAR_CUTOFF_V7 = 10000.0
+
+
+def default_camera_distance(index: int, version: int = 8,
+                            count: int = 4) -> float:
+    """The distance at which LOD `index` of `count` takes over.
+
+    Vanilla ladders vary per model rather than per game - the sample set
+    has anything from one level to four - so this is only a starting
+    point for a ladder the exporter generates. What does follow the
+    version is the shape: before v7 the coarsest level is just another
+    step out, and from v7 it is a cutoff large enough never to be
+    reached.
+    """
+    if version >= 7:
+        if index >= count - 1:
+            return _FAR_CUTOFF_V7
+        table = _CAMERA_DISTANCES_V7
+    else:
+        table = _CAMERA_DISTANCES_PRE_V7
+    if index < len(table):
+        return table[index]
+    return table[-1] * (2 ** (index - len(table) + 1))
 
 
 def default_lod_overrides(root_collection, rigged: bool):
@@ -102,36 +145,70 @@ def default_lod_overrides(root_collection, rigged: bool):
     quality_level is the lowest graphics setting a LOD is active on, so
     the coarse/far LODs (cheap, always fine to show) should stay visible
     at every setting while the expensive close-up LOD0 is reserved for
-    higher settings.
+    higher settings.  Before v7 the LOD header has no quality level at
+    all (rmv2_format._LOD_HEADER_V5_V6 stops after the camera distance),
+    so those rows are left at 0 rather than filled in with a number the
+    file has nowhere to keep.
     Used both right after RMV2 import (import_rmv2.import_file) and by
     the "reset to defaults" button."""
+    from . import capabilities
+
     s = root_collection.rmv2
+    container, version = capabilities.container_and_version(s)
     s.lod_overrides.clear()
+    if "auto_lods" not in capabilities.collection_caps(root_collection):
+        # No ladder in the container for generated levels to go into, so
+        # there is nothing for these rows to describe.
+        return
+    if container == "VMPF":
+        # A guess, and flagged as one: .variant_part_mesh's parts are its
+        # ladder, but how many levels vanilla actually ships and at what
+        # reduction has not been surveyed - see TODO 3b. Four halving
+        # levels matches what .rigid_model_v2 does, which is the only
+        # evidence-backed ladder we have. The format is left on Auto
+        # because its two layouts are skinned and rigid: forcing a far
+        # level to rigid would unskin the part, not cheapen it.
+        for level in range(4):
+            entry = s.lod_overrides.add()
+            entry.vertex_format = "AUTO"
+            entry.decimate_ratio = 1.0 if level == 0 else 0.5 ** level
+        return
     formats = (["CINEMATIC", "CINEMATIC", "WEIGHTED", "WEIGHTED"] if rigged
               else ["STATIC"] * 4)
     for level in range(4):
         entry = s.lod_overrides.add()
         entry.vertex_format = formats[level]
         entry.decimate_ratio = 1.0 if level == 0 else 0.5 ** level
-        entry.camera_distance = default_camera_distance(level)
-        entry.quality_level = max(0, 2 - level)
+        entry.camera_distance = default_camera_distance(level, version, 4)
+        entry.quality_level = max(0, 2 - level) if version >= 7 else 0
 
 
 def _lods_for_root(root):
     """[ (lod_info, [objects]) ] for an explicit root collection, using its
     LOD sub-collections if present, else its mesh objects as a single LOD."""
+    from . import capabilities
+
     children = _lod_children(root)
+    _, version = capabilities.container_and_version(root.rmv2)
     if not children:
-        return [({"level": 0, "camera_distance": default_camera_distance(0),
+        return [({"level": 0,
+                  "camera_distance": default_camera_distance(0, version, 1),
                   "quality_level": 0}, _mesh_objects(root))]
     lods = []
-    for i, col in enumerate(children):
+    for i, (level, col) in enumerate(children):
         s = col.rmv2
+        # `lod_values_set` says the camera distance and quality level in
+        # this collection are real - they came from a file, or from
+        # Setup LOD Collections. A LOD nobody has filled in (a ladder
+        # built by hand) gets the era's defaults instead of the property
+        # defaults, which is what the removed `is_lod` flag used to
+        # decide.
         info = {
-            "level": s.lod_level if s.is_lod else i,
-            "camera_distance": (s.camera_distance if s.is_lod
-                                else default_camera_distance(i)),
-            "quality_level": s.quality_level if s.is_lod else 0,
+            "level": level,
+            "camera_distance": (
+                s.camera_distance if s.lod_values_set
+                else default_camera_distance(i, version, len(children))),
+            "quality_level": s.quality_level if s.lod_values_set else 0,
         }
         lods.append((info, [o for o in col.objects if o.type == "MESH"]))
     return lods
@@ -160,6 +237,8 @@ def find_rmv2_roots(context):
 
 def gather_lods(context, options):
     """Returns (root_collection_or_None, [ (lod_info, [objects]) ])."""
+    from . import capabilities
+
     source = options.get("source", "AUTO")
     scene = context.scene
 
@@ -167,7 +246,7 @@ def gather_lods(context, options):
     active = context.view_layer.active_layer_collection
     active_col = active.collection if active else None
     if active_col is not None:
-        if active_col.rmv2.is_lod:
+        if capabilities.is_lod(active_col):
             parent = _find_parent_collection(scene, active_col)
             if parent is not None:
                 active_col = parent
@@ -190,7 +269,8 @@ def gather_lods(context, options):
         lods.append((None, objs))
 
     lods = [(info if info is not None else {
-        "level": i, "camera_distance": default_camera_distance(i),
+        "level": i,
+        "camera_distance": default_camera_distance(i, count=len(lods)),
         "quality_level": 0}, objs)
         for i, (info, objs) in enumerate(lods)]
 
@@ -217,7 +297,7 @@ def expand_auto_lods(lods, count: int, overrides=None):
         info = {
             "level": i,
             "camera_distance": (row.camera_distance if row
-                                else default_camera_distance(i)),
+                                else default_camera_distance(i, count=n)),
             "quality_level": row.quality_level if row else 0,
             "decimate_ratio": (1.0 if i == 0
                               else (row.decimate_ratio if row
@@ -1105,7 +1185,14 @@ def _export_lods(context, root, lods, filepath: str, options: dict):
         lods = expand_auto_lods(
             [best], max(2, options.get("auto_lod_count", 4)), overrides)
 
-    version = int(options.get("version", "7"))
+    # The version comes from the model itself - the root collection
+    # records what it was read from - so there is no version field in the
+    # export dialog to disagree with it. Batch export gets this right per
+    # collection, which one dialog value never could. An explicit
+    # options["version"] still wins, for programmatic callers and tests.
+    version = int(chosen_version(
+        options, "version", root_format_version(root, "RMV2", "8")))
+    options = dict(options, version=str(version))
     if version in rf.SHOGUN2_VERSIONS:
         # Shogun 2 stores vertices in the bone's space; see
         # extract_mesh_arrays.

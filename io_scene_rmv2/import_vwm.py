@@ -8,7 +8,7 @@ holds the whole ladder, so importing the four files in any order fills
 in one root collection rather than making four unrelated ones:
 
     <unit>              collection, rmv2.is_rmv2_root
-      <unit>_lod0..3    collections, rmv2.is_lod
+      <unit>_lod0..3    collections (a LOD is any child of a root)
         <part>          one mesh object per part
 
 CA numbers the levels from 1; they are shifted to Blender-side 0 so the
@@ -24,6 +24,15 @@ single bone - muskets, backpacks, flagpoles.  Those are rigid
 importer does it, with a Child Of constraint and no vertex groups.
 Empire's unitmodels/euro_equipment.variant_weighted_mesh is nothing but
 134 of them.
+
+One file holds every alternative the unit's variants can pick between -
+four heads, two bodies, two pairs of legs - all standing in the same
+place, which is a solid ball of overlapping geometry to open.  Nothing in
+the container groups them, so the parts are grouped the only way the file
+allows and the way CA's own variant tables address them: by name up to a
+trailing number (see `variant_slot`).  The lowest-numbered member of each
+slot is left visible and the rest get their viewport eye closed.  Nothing
+is deleted, and export still writes them all.
 
 The catch, shared with Shogun 2's .variant_part_mesh, is that VWM holds
 no model-space position at all: every vertex is stored once per
@@ -45,6 +54,7 @@ import numpy as np
 
 from . import arm_format as armf
 from . import import_arm, materials, mesh_build, scene_layout, skeleton
+from .properties import fill_shader_params, set_format_version
 from . import utils
 from . import vwm_format as vf
 
@@ -63,6 +73,16 @@ _TEXTURE_SUFFIXES = (
 
 _LOD_SUFFIX = re.compile(r"^(.*)_lod(\d+)$", re.IGNORECASE)
 
+# The alternatives a variant can pick between for one body slot.  Nothing
+# in the container marks them: the part table is flat, the parts carry no
+# slot field, and the only thing that says `<unit>_body01` and
+# `<unit>_body02` are two answers to the same question is that they are
+# spelled the same up to a trailing number.  That is not a shortcut - it
+# is how CA's own variant tables address a part, since the file gives
+# them nothing else to address it by either.  So: strip the trailing
+# number, and everything sharing the stem is one slot.
+_VARIANT_SUFFIX = re.compile(r"^(.*?)(\d+)$")
+
 
 class VwmImportError(Exception):
     pass
@@ -78,6 +98,43 @@ def split_lod(stem: str) -> tuple:
     if not match:
         return stem, 0
     return match.group(1), max(0, int(match.group(2)) - 1)
+
+
+def variant_slot(name: str, index: int) -> tuple:
+    """(slot key, variant number) for one part or attachment name.
+
+    A name with no trailing number - `Telescope`, `rigid_equip_gen_
+    cannonball` - is a slot of one.  So is a nameless part: CA's older
+    testdata files write no names at all, and lumping those together
+    would hide most of the model.
+    """
+    match = _VARIANT_SUFFIX.match(name or "")
+    if match and match.group(1):
+        return ("stem", match.group(1).casefold()), int(match.group(2))
+    return ("part", index), 0
+
+
+def hide_extra_variants(rows: list) -> int:
+    """Leave one object visible per slot; hide the rest.  Returns how many.
+
+    `rows` is [(slot key, variant number, object)].  The lowest-numbered
+    variant wins, which is the one CA's ladders start at.  This only
+    touches the viewport eye - nothing is deleted and export still writes
+    every part, so the file keeps all its variants.
+    """
+    keep = {}
+    for key, number, obj in rows:
+        current = keep.get(key)
+        if current is None or number < current[0]:
+            keep[key] = (number, obj)
+    winners = {id(entry[1]) for entry in keep.values()}
+    hidden = 0
+    for _, _, obj in rows:
+        if id(obj) in winners:
+            continue
+        scene_layout.hide_object(obj)
+        hidden += 1
+    return hidden
 
 
 def _build_mesh_object(part, name: str, scale: float, frames: dict,
@@ -207,8 +264,16 @@ def import_file(context, filepath: str, options: dict):
     root = scene_layout.find_root(base)
     if root is None:
         root = scene_layout.new_root(context, base, REFERENCE_SKELETON)
-    root.rmv2.vwm_version = str(model.version)
-    scene_layout.adopt_armature(root, armature)
+    set_format_version(root.rmv2, "VWM", model.version)
+    # One parameter block per file, so it belongs to the root. With no
+    # texture slots and no material id, it is most of what this format
+    # says about the surface.
+    fill_shader_params(root.rmv2, model.float_params, model.vec4_params)
+    if armature is not None:
+        # A file of nothing but attachments (euro_equipment) is
+        # rigid throughout and imports without a skeleton, so
+        # there may be no armature to adopt.
+        scene_layout.adopt_armature(root, armature)
     lod = scene_layout.find_or_new_lod(root, f"{base}_lod{level}", level)
 
     texture_pairs = []
@@ -217,17 +282,24 @@ def import_file(context, filepath: str, options: dict):
             base, options.get("texture_root", ""))
         if not texture_pairs:
             warnings.append(
-                f"{base}: no textures found under '{_TEXTURE_DIR}/'; set "
-                "the add-on's Texture Root Directory to a folder of "
-                "extracted game textures to get materials")
+                f"{base}: this format names no textures - they are looked "
+                f"up by the part name under '{_TEXTURE_DIR}/', and none "
+                f"were found for '{base}'. Set Texture Root in this "
+                "import dialog (under Build Materials), or once for good "
+                "in Edit > Preferences > Add-ons > Total War Model … > "
+                "Texture Root Directory")
 
     stats = {"meshes": 0, "vertices": 0, "triangles": 0, "lods": 1,
-             "attachments": 0}
+             "attachments": 0, "hidden": 0}
+    # (slot key, variant number, object) for everything this file builds,
+    # so the alternatives for one slot can be collapsed to one at the end.
+    slots: list = []
     for part in model.parts:
         name = part.name or f"{base}_part{stats['meshes']:02d}"
         obj = _build_mesh_object(part, name, scale, frames, bone_names,
                                  warnings)
         lod.objects.link(obj)
+        slots.append((*variant_slot(part.name, len(slots)), obj))
         if texture_pairs:
             material = materials.build_material(
                 name, texture_pairs, "NONE", options.get("texture_root", ""))
@@ -243,12 +315,17 @@ def import_file(context, filepath: str, options: dict):
         obj = _build_attachment(entry, index, scale, armature, bone_names,
                                 options, warnings)
         lod.objects.link(obj)
+        slots.append((*variant_slot(entry.name, len(slots)), obj))
         stats["meshes"] += 1
         stats["attachments"] += 1
         stats["vertices"] += entry.mesh.vertex_count
         stats["triangles"] += len(entry.mesh.indices) // 3
 
+    if options.get("single_variant", True):
+        stats["hidden"] = hide_extra_variants(slots)
+
     levels = [(child.rmv2.lod_level, child)
-              for child in root.children if child.rmv2.is_lod]
+              for child in root.children
+              if not child.rmv2.is_rmv2_root]
     scene_layout.show_only_most_detailed_lod(context, levels)
     return root, stats, warnings

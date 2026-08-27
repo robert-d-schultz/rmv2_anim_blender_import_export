@@ -14,6 +14,7 @@ from __future__ import annotations
 from . import anim_format as anf
 from . import arm_format as armf
 from . import export_anim, export_arm, skeleton
+from .properties import chosen_version, root_format_version
 
 
 class RmaExportError(Exception):
@@ -23,7 +24,7 @@ class RmaExportError(Exception):
 def export_file(context, filepath: str, options: dict):
     """Write one .rigid_model_animation. Returns (stats, warnings)."""
     warnings: list = []
-    objects = export_arm._gather_objects(context, options)
+    root, objects = export_arm._gather_objects(context, options)
     if not objects:
         raise RmaExportError(
             "Nothing to export: select the mesh objects, or make the "
@@ -37,6 +38,8 @@ def export_file(context, filepath: str, options: dict):
             "so it cannot be written without an armature. Select the "
             "model's armature and try again")
 
+    options = dict(options, arm_version=int(chosen_version(
+        options, "arm_version", root_format_version(root, "ARM", "5"))))
     arm = armf.ArmFile()
     for obj in objects:
         mesh = export_arm._build_mesh(context, obj, options, warnings)

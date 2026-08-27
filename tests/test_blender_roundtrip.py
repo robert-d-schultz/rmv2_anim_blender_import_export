@@ -32,6 +32,10 @@ from io_scene_rmv2 import rmv2_format as rf  # noqa: E402
 from io_scene_rmv2 import skeleton as rmv2_skeleton  # noqa: E402
 from io_scene_rmv2 import utils  # noqa: E402
 
+# Real vanilla files, for the cases where the point is what CA
+# actually ships rather than what a synthetic file can express.
+SAMPLES = os.path.join(REPO, "samples")
+
 FAILURES = []
 
 
@@ -723,8 +727,12 @@ def auto_lod_case(tmpdir):
           f"each LOD has fewer triangles than the last ({tri_counts})")
     check(tri_counts[-1] <= tri_counts[0] * 0.25,
           "last LOD is substantially reduced")
-    check([round(lod.camera_distance) for lod in result.lods]
-          == [20, 40, 80, 160], "default camera distances assigned")
+    # The generated ladder follows the target version: from v7 the last
+    # level is a cutoff big enough never to be reached, which is what
+    # every multi-LOD v7/v8 vanilla file does.
+    distances = [round(lod.camera_distance) for lod in result.lods]
+    check(distances == [100, 200, 400, 10000],
+          f"default camera distances follow the v7+ shape ({distances})")
     check([lod.lod_level for lod in result.lods] == [0, 1, 2, 3],
           "lod levels sequential")
     # every LOD must still be a sphere-ish blob of radius ~1 (collapse
@@ -1063,7 +1071,8 @@ def operator_case(tmpdir):
     check(result == {"FINISHED"}, "default import finished")
     root_default = next(c for c in bpy.data.collections
                         if c.rmv2.is_rmv2_root)
-    check(len([c for c in root_default.children if c.rmv2.is_lod]) == 1,
+    check(len([c for c in root_default.children
+               if not c.rmv2.is_rmv2_root]) == 1,
           "default import only brings in the most detailed LOD")
     reset_scene()
     result = bpy.ops.import_scene.rmv2(filepath=src, import_all_lods=True)
@@ -1071,8 +1080,7 @@ def operator_case(tmpdir):
     dst = os.path.join(tmpdir, "op_dst.rigid_model_v2")
     root = next(c for c in bpy.data.collections if c.rmv2.is_rmv2_root)
     activate_collection(root.name)
-    result = bpy.ops.export_scene.rmv2(filepath=dst, source="AUTO",
-                                       version="8")
+    result = bpy.ops.export_scene.rmv2(filepath=dst, source="AUTO")
     check(result == {"FINISHED"}, "export operator finished")
     with open(dst, "rb") as handle:
         out = rf.load(handle.read())
@@ -2116,8 +2124,9 @@ def lod_overrides_autofill_case():
     check([r.quality_level for r in rows] == [2, 1, 0, 0],
           f"auto-filled rows use the counting-down quality defaults "
           f"({[r.quality_level for r in rows]})")
-    check([round(r.camera_distance) for r in rows] == [20, 40, 80, 160],
-          "auto-filled rows get the doubling camera distances")
+    check([round(r.camera_distance) for r in rows] == [100, 200, 400, 10000],
+          f"auto-filled rows get the version's camera distances "
+          f"({[round(r.camera_distance) for r in rows]})")
 
     # Toggling the flag must not clobber edits the user has since made.
     rows[0].quality_level = 99
@@ -2129,10 +2138,11 @@ def lod_overrides_autofill_case():
           "alone instead of resetting them")
 
 
-def _make_batch_root(name, skeleton_name, add_mesh=True):
+def _make_batch_root(name, skeleton_name, add_mesh=True, version="8"):
     root = bpy.data.collections.new(name)
     bpy.context.scene.collection.children.link(root)
     root.rmv2.is_rmv2_root = True
+    root.rmv2.version = version
     root.rmv2.skeleton_name = skeleton_name
     if add_mesh:
         bpy.ops.mesh.primitive_cube_add()
@@ -2146,13 +2156,12 @@ def batch_export_case(tmpdir):
     print("\n=== Batch RMV2 export ===")
     reset_scene()
 
-    _make_batch_root("batch_alpha", "skel_alpha")
-    _make_batch_root("batch_beta", "skel_beta")
+    _make_batch_root("batch_alpha", "skel_alpha", version="7")
+    _make_batch_root("batch_beta", "skel_beta", version="8")
     _make_batch_root("batch_empty", "", add_mesh=False)
 
     out_dir = os.path.join(tmpdir, "batch_out")
     results = export_rmv2.export_batch(bpy.context, out_dir, {
-        "version": "7",
         "apply_modifiers": True,
         "high_precision": False,
         "write_attach_points": True,
@@ -2179,6 +2188,9 @@ def batch_export_case(tmpdir):
           and out_b.skeleton_name == "skel_beta",
           "each file keeps its own collection's skeleton name, not one "
           "shared value from the (forced-blank) batch options dict")
+    check(out_a.version == 7 and out_b.version == 8,
+          f"and its own version, which one export dialog could never have "
+          f"expressed ({out_a.version}, {out_b.version})")
 
     # Exercise the actual export operator's BATCH source end to end, not
     # just the underlying export_rmv2.export_batch function.
@@ -2187,7 +2199,7 @@ def batch_export_case(tmpdir):
     op_dir = os.path.join(tmpdir, "batch_op_out")
     result = bpy.ops.export_scene.rmv2(
         filepath=os.path.join(op_dir, "placeholder.rigid_model_v2"),
-        source="BATCH", version="7")
+        source="BATCH")
     check(result == {"FINISHED"}, "batch export operator finished")
     check(os.path.isfile(
         os.path.join(op_dir, "batch_op_alpha.rigid_model_v2")),
@@ -2271,7 +2283,7 @@ def shogun2_anim_case(tmpdir):
     check(arm_obj.data.bones[1].parent is not None
           and arm_obj.data.bones[1].parent.name == "bone_cannon_base",
           "bone hierarchy imported")
-    check(arm_obj.data.rmv2.anim_version == 1, "version 1 recorded")
+    check(arm_obj.data.rmv2.anim_version == "1", "version 1 recorded")
     check(stats["keyed_bones"] > 0,
           "a moving Shogun 2 file is keyed as an action too - it is both "
           "the skeleton and the animation")
@@ -2562,7 +2574,7 @@ def vwm_case(tmpdir):
     check(stats["meshes"] == 2, "both parts imported")
     check(root.name == "grenadiers",
           f"the _lod1 suffix names the root 'grenadiers' (got {root.name})")
-    lods = [c for c in root.children if c.rmv2.is_lod]
+    lods = [c for c in root.children if not c.rmv2.is_rmv2_root]
     check(len(lods) == 1 and lods[0].rmv2.lod_level == 0,
           "CA's lod1 becomes Blender's LOD 0")
 
@@ -2603,7 +2615,8 @@ def vwm_case(tmpdir):
     root2, _, _ = import_vwm.import_file(bpy.context, path2, {
         "build_materials": False, "texture_root": "", "global_scale": 1.0})
     check(root2 is root, "a unit's LODs share one root collection")
-    levels = sorted(c.rmv2.lod_level for c in root.children if c.rmv2.is_lod)
+    levels = sorted(c.rmv2.lod_level for c in root.children
+                    if not c.rmv2.is_rmv2_root)
     check(levels == [0, 1], f"the ladder fills in ({levels})")
 
     # Export the finest level back out.
@@ -2648,6 +2661,1008 @@ def vwm_case(tmpdir):
           "the split part keeps both influences")
 
 
+def rigid_attach_either_order_case(tmpdir):
+    """A piece that rides one bone must end up welded to it whichever of
+    its two files is opened first, for every format - not just for the
+    Warhammer 3 destructible buildings the deferred attach was written
+    for. It used to be gated on the .anim naming its skeleton
+    "building", so a Shogun 2 .animatable_rigid_model prop imported
+    before its armature kept a matrix_index that nothing acted on."""
+    print("\n=== rigid pieces attach in either import order ===")
+    from io_scene_rmv2 import arm_format as armf
+    from io_scene_rmv2 import import_anim, import_arm
+
+    arm_path = os.path.join(tmpdir, "cannon.animatable_rigid_model")
+    with open(arm_path, "wb") as handle:
+        handle.write(armf.save(make_arm_file(bone_indices=(2,))))
+
+    # The gate was this value; neither name should matter now.
+    for skeleton_name in ("cannon", "building"):
+        anim_path = write_anim(
+            tmpdir, "skel_%s.anim" % skeleton_name,
+            af.build_simple(7, skeleton_name, 20.0, ANIM_BONES,
+                            np.array([BIND_T, BIND_T], np.float32),
+                            np.array([BIND_R, BIND_R], np.float32)))
+
+        # ---- mesh first, armature second ----------------------------
+        reset_scene()
+        root, _, _ = import_arm.import_file(bpy.context, arm_path, {
+            "build_materials": False, "texture_root": "",
+            "attach_armature": False, "global_scale": 1.0})
+        obj = next(o for o in root.all_objects if o.type == "MESH")
+        check(obj.rmv2.matrix_index == 2,
+              "%s: the bone index is kept while there is no armature "
+              "(%d)" % (skeleton_name, obj.rmv2.matrix_index))
+        obj.select_set(True)
+        bpy.context.view_layer.objects.active = obj
+        arm_obj, _, _ = import_anim.import_file(bpy.context, anim_path, {
+            "attach_meshes": True, "global_scale": 1.0, "mode": "SKELETON"})
+        bone_names = rmv2_skeleton.bone_name_by_index(arm_obj)
+        subtargets = [c.subtarget for c in obj.constraints
+                      if c.type == "CHILD_OF"]
+        check(subtargets == [bone_names[2]],
+              "%s: mesh first, then .anim -> welded to %s (%s)"
+              % (skeleton_name, bone_names[2], subtargets or "nothing"))
+        check(obj.rmv2.matrix_index == -1,
+              "%s: and the stored index is cleared, so the constraint is "
+              "the only source of truth (%d)"
+              % (skeleton_name, obj.rmv2.matrix_index))
+
+        # ---- armature first, mesh second: the same answer -----------
+        reset_scene()
+        arm_obj, _, _ = import_anim.import_file(bpy.context, anim_path, {
+            "attach_meshes": True, "global_scale": 1.0, "mode": "SKELETON"})
+        bpy.context.view_layer.objects.active = arm_obj
+        arm_obj.select_set(True)
+        root, _, _ = import_arm.import_file(bpy.context, arm_path, {
+            "build_materials": False, "texture_root": "",
+            "attach_armature": True, "global_scale": 1.0})
+        obj = next(o for o in root.all_objects if o.type == "MESH")
+        bone_names = rmv2_skeleton.bone_name_by_index(arm_obj)
+        subtargets = [c.subtarget for c in obj.constraints
+                      if c.type == "CHILD_OF"]
+        check(subtargets == [bone_names[2]],
+              "%s: .anim first, then mesh -> the same weld (%s)"
+              % (skeleton_name, subtargets or "nothing"))
+
+    # A skinned mesh must NOT be caught by that path: it has vertex
+    # groups, which is what tells the two cases apart.
+    reset_scene()
+    anim_path = write_anim(tmpdir, "skel_skinned.anim", make_skeleton_anim())
+    arm_obj, _, _ = import_anim.import_file(bpy.context, anim_path, {
+        "attach_meshes": True, "global_scale": 1.0, "mode": "SKELETON"})
+    bpy.ops.mesh.primitive_cube_add()
+    skinned = bpy.context.active_object
+    skinned.vertex_groups.new(name="bone_1")
+    skinned.rmv2.matrix_index = 2      # a stale number, deliberately
+    skinned.select_set(True)
+    arm_obj.select_set(True)
+    bpy.context.view_layer.objects.active = arm_obj
+    import_anim.import_file(bpy.context, anim_path, {
+        "attach_meshes": True, "global_scale": 1.0, "mode": "ANIMATION"})
+    check(not [c for c in skinned.constraints if c.type == "CHILD_OF"],
+          "a mesh with vertex groups is skinned, not welded, even with a "
+          "matrix_index set")
+
+
+def vmpf_rigid_mount_case(tmpdir):
+    """A rigid .variant_part_mesh part is not skinned: it rides one bone
+    whole, named in its own header, with its vertices already in that
+    bone's space.  So it must arrive with a Child Of constraint and NO
+    vertex groups - reporting bone 0 at full weight for every rigid
+    vertex (which is what decode_vertices does, to keep the channel dict
+    one shape) once welded every prop in the game to the skeleton's first
+    bone and left it at the origin."""
+    print("\n=== Shogun 2 .variant_part_mesh rigid mounts ===")
+    from io_scene_rmv2 import vmpf_format as vfmt
+    from io_scene_rmv2 import export_vmpf, import_vmpf
+    reset_scene()
+
+    arm_obj = _import_empire_skeleton(tmpdir, "man_shogun.anim")
+    bone_names = rmv2_skeleton.bone_name_by_index(arm_obj)
+
+    cube = make_cube_mesh(0)
+    tris = cube.indices.reshape(-1, 3).astype(np.uint16)
+    model = vfmt.VmpfFile(version=3, vertex_format=vfmt.VF_RIGID_NAMED)
+    model.skeleton_name = "man_shogun"
+    mounts = {"rigid_equip_hat_lod1": 2, "rigid_equip_pack_lod1": 1}
+    for name, bone in mounts.items():
+        part = vfmt.VmpfPart(name=name, bone_index=bone,
+                             material_names=["default"] * 3)
+        part.vertices = vfmt.encode_rigid_vertices(
+            cube.positions, cube.normals, cube.tangents, cube.binormals,
+            cube.uv0, np.zeros_like(cube.uv0),
+            np.ones((len(cube.positions), 4), np.float32))
+        part.indices = tris.ravel()
+        model.parts.append(part)
+
+    path = os.path.join(tmpdir, "equipment.variant_part_mesh")
+    with open(path, "wb") as handle:
+        handle.write(vfmt.save(model))
+
+    root, stats, warnings = import_vmpf.import_file(bpy.context, path, {
+        "global_scale": 1.0, "attach_armature": True, "import_lods": "ALL",
+        "build_materials": False})
+    objs = {o.name: o for o in root.all_objects if o.type == "MESH"}
+    check(sorted(objs) == ["rigid_equip_hat_lod0",
+                           "rigid_equip_pack_lod0"],
+          f"both props imported ({sorted(objs)})")
+    # matrix_world is evaluated, and the constraints were only just added.
+    bpy.context.view_layer.update()
+
+    for name, bone in (("rigid_equip_hat_lod0", 2),
+                       ("rigid_equip_pack_lod0", 1)):
+        obj = objs[name]
+        check(not obj.vertex_groups,
+              f"{name}: rigid, so no vertex groups "
+              f"({[g.name for g in obj.vertex_groups]})")
+        cons = [c for c in obj.constraints if c.type == "CHILD_OF"]
+        check(len(cons) == 1 and cons[0].subtarget == bone_names[bone],
+              f"{name}: hangs off {bone_names[bone]} "
+              f"({[c.subtarget for c in cons]})")
+        head = (arm_obj.matrix_world
+                @ arm_obj.data.bones[bone_names[bone]].head_local)
+        drift = (obj.matrix_world.translation - head).length
+        check(drift < 1e-5,
+              f"{name}: sits at that bone, not the origin "
+              f"(drift {drift:.6f})")
+        check(not any(m.type == "ARMATURE" for m in obj.modifiers),
+              f"{name}: no armature modifier - it does not deform")
+
+    # The bone each prop rides has to survive the round trip, and the
+    # constraint - not the number stashed at import - is what says so.
+    objs["rigid_equip_hat_lod0"].constraints[0].subtarget = bone_names[0]
+    # A library opens with all but the first prop hidden, and Blender
+    # will not select a hidden object - so unhide before selecting. The
+    # default export source reads the collection rather than the
+    # selection and needs none of this.
+    for obj in root.all_objects:
+        if obj.type == "MESH":
+            obj.hide_set(False)
+    for obj in root.all_objects:
+        obj.select_set(obj.type == "MESH")
+    out = os.path.join(tmpdir, "equipment_out.variant_part_mesh")
+    export_vmpf.export_file(bpy.context, out, {
+        "source": "SELECTED", "apply_modifiers": True, "skeleton_name": "",
+        "version": "3", "global_scale": 1.0, "auto_lods": False})
+    written = vfmt.load(open(out, "rb").read())
+    check(written.vertex_format == vfmt.VF_RIGID_NAMED,
+          "written back as a named rigid library")
+    by_name = {p.name: p.bone_index for p in written.parts}
+    check(by_name.get("rigid_equip_pack_lod1") == 1,
+          f"the untouched prop keeps its bone ({by_name})")
+    check(by_name.get("rigid_equip_hat_lod1") == 0,
+          f"re-hanging a prop in Blender is what gets written ({by_name})")
+
+
+def vwm_variant_slot_case(tmpdir):
+    """One .variant_weighted_mesh holds every alternative a unit's
+    variants can draw, all standing in the same place.  Nothing in the
+    container groups them, so they are grouped by name up to a trailing
+    number and all but the first of each slot open hidden."""
+    print("\n=== Empire variant slots ===")
+    from io_scene_rmv2 import vwm_format as wfmt
+    from io_scene_rmv2 import import_vwm
+    reset_scene()
+
+    arm_obj = _import_empire_skeleton(tmpdir)
+    frames = rmv2_skeleton.bind_frames_in_game_space(arm_obj, 1.0)
+    cube = make_cube_mesh(0)
+    tris = cube.indices.reshape(-1, 3)
+
+    model = wfmt.VwmFile(version=1)
+    names = ["unit_head01", "unit_head02", "unit_head03", "unit_body01",
+             "Telescope"]
+    model.parts = [
+        make_vwm_part(name, cube.positions, cube.normals, cube.uv0, tris,
+                      frames, [(2, 1.0)])
+        for name in names]
+
+    path = os.path.join(tmpdir, "slots_lod1.variant_weighted_mesh")
+    with open(path, "wb") as handle:
+        handle.write(wfmt.save(model))
+
+    options = {"build_materials": False, "texture_root": "",
+               "global_scale": 1.0, "single_variant": True}
+    root, stats, _ = import_vwm.import_file(bpy.context, path, options)
+    check(stats["hidden"] == 2, f"2 spare variants hidden "
+                                f"(got {stats['hidden']})")
+    visible = sorted(o.name for o in root.all_objects
+                     if o.type == "MESH" and not o.hide_get())
+    check(visible == ["Telescope", "unit_body01", "unit_head01"],
+          f"one head, the body and the un-numbered prop stay visible "
+          f"({visible})")
+
+    # Off, everything shows - and nothing was ever deleted either way.
+    reset_scene()
+    arm_obj = _import_empire_skeleton(tmpdir)
+    root, stats, _ = import_vwm.import_file(
+        bpy.context, path, dict(options, single_variant=False))
+    check(stats["hidden"] == 0, "the option turns it off")
+    shown = sorted(o.name for o in root.all_objects
+                   if o.type == "MESH" and not o.hide_get())
+    check(shown == sorted(names), f"all five parts visible ({shown})")
+
+
+def vmpf_auto_lod_case(tmpdir):
+    """.variant_part_mesh parts are its LOD ladder, the same as
+    .rigid_model_v2's LOD table, so Generate LODs drives both. It used to
+    be wired to the RMV2 exporter alone, which made the Auto-LOD panel
+    section look inapplicable here when it was only unimplemented."""
+    print("\n=== .variant_part_mesh generated LOD ladder ===")
+    from io_scene_rmv2 import vmpf_format as vfmt
+    from io_scene_rmv2 import export_vmpf, import_vmpf
+    reset_scene()
+
+    arm_obj = _import_empire_skeleton(tmpdir, "man_shogun2.anim")
+    bone_names = rmv2_skeleton.bone_name_by_index(arm_obj)
+
+    # A rigid part dense enough for decimation to have something to cut.
+    bpy.ops.mesh.primitive_uv_sphere_add(segments=32, ring_count=16)
+    obj = bpy.context.active_object
+    obj.rmv2.vertex_format = "VMPF_RIGID"
+    root = bpy.data.collections.new("equip")
+    bpy.context.scene.collection.children.link(root)
+    root.rmv2.is_rmv2_root = True
+    root.rmv2.version = "VMPF_3"
+    lod0 = bpy.data.collections.new("equip_lod0")
+    root.children.link(lod0)
+    lod0.rmv2.lod_level = 0
+    for col in list(obj.users_collection):
+        col.objects.unlink(obj)
+    lod0.objects.link(obj)
+    rmv2_skeleton.attach_to_bone(obj, arm_obj, bone_names[1])
+    activate_collection(root.name)
+
+    out = os.path.join(tmpdir, "equip.variant_part_mesh")
+    stats, warnings = export_vmpf.export_file(bpy.context, out, {
+        "source": "AUTO", "apply_modifiers": True, "skeleton_name": "",
+        "version": "3", "global_scale": 1.0,
+        "auto_lods": True, "auto_lod_count": 4})
+    written = vfmt.load(open(out, "rb").read())
+    counts = [p.vertex_count for p in written.parts]
+    check(len(written.parts) == 4,
+          f"one part per generated level ({len(written.parts)})")
+    check(all(a > b for a, b in zip(counts, counts[1:])),
+          f"and each is coarser than the last ({counts})")
+
+    # Off, the hand-made ladder is written as-is.
+    stats, _ = export_vmpf.export_file(bpy.context, out, {
+        "source": "AUTO", "apply_modifiers": True, "skeleton_name": "",
+        "version": "3", "global_scale": 1.0, "auto_lods": False})
+    plain = vfmt.load(open(out, "rb").read())
+    check(len(plain.parts) == 1,
+          f"with it off, the one LOD collection is the whole ladder "
+          f"({len(plain.parts)})")
+
+
+def shader_params_case(tmpdir):
+    """Named shader parameters ("light_scale", "specfactor") survive a
+    Blender round-trip, and land in the panel the container puts them in.
+
+    Where the block sits differs and is not a UI preference:
+    `.animatable_rigid_model` writes one per object - Shogun 2's
+    naval_cannon_12lb_lod4 has 13 parameters on three of its four
+    objects and none at all on the fourth - while the two variant
+    formats write one for the whole file.
+    """
+    print("\n=== shader parameters ===")
+    from io_scene_rmv2 import arm_format as armf
+    from io_scene_rmv2 import export_arm, import_arm
+    from io_scene_rmv2 import export_vwm, import_vwm
+    from io_scene_rmv2 import vwm_format as wfmt
+    reset_scene()
+
+    # ---- ARM: per object, and objects in one file do differ ----------
+    arm = make_arm_file()
+    arm.meshes[0].float_params = [("light_scale", 0.25),
+                                  ("bumpfactor", 3.5)]
+    # Every vec4 in the corpus is an RGBA colour and stays inside 0..1,
+    # so the panel draws a swatch - but the field is not range-limited,
+    # and a hard 0..1 on the Blender property would silently clamp this
+    # 1.5 to 1.0. Assert it survives instead.
+    arm.meshes[0].vec4_params = [("specfactor", (1.5, 0.2, 0.3, 0.4))]
+    # The vanilla case that disproves "file-wide": no block at all.
+    arm.meshes[1].float_params = []
+    arm.meshes[1].vec4_params = []
+
+    path = os.path.join(tmpdir, "params.animatable_rigid_model")
+    with open(path, "wb") as handle:
+        handle.write(armf.save(arm))
+
+    root, _, _ = import_arm.import_file(bpy.context, path, {
+        "build_materials": False, "texture_root": "",
+        "attach_armature": False, "global_scale": 1.0})
+    objs = sorted((o for o in root.all_objects if o.type == "MESH"),
+                  key=lambda o: o.name)
+    named = [[(e.name, round(e.value, 4)) for e in o.rmv2.shader_params
+              if e.kind == "FLOAT"] for o in objs]
+    check(named[0] == [("light_scale", 0.25), ("bumpfactor", 3.5)],
+          f"the first object's float parameters imported ({named[0]})")
+    check(named[1] == [],
+          f"the second object's empty block stayed empty ({named[1]})")
+    vecs = [(e.name, tuple(round(v, 4) for v in e.vector))
+            for e in objs[0].rmv2.shader_params if e.kind == "VEC4"]
+    check(vecs == [("specfactor", (1.5, 0.2, 0.3, 0.4))],
+          f"the RGBA parameter imported unclamped ({vecs})")
+
+    for obj in objs:
+        obj.select_set(True)
+    bpy.context.view_layer.objects.active = objs[0]
+    out = os.path.join(tmpdir, "params_out.animatable_rigid_model")
+    export_arm.export_file(bpy.context, out, {
+        "source": "SELECTED", "apply_modifiers": True,
+        "global_scale": 1.0})
+    result = armf.load(open(out, "rb").read())
+    got = [[(n, round(v, 4)) for n, v in m.float_params]
+           for m in result.meshes]
+    check(got[0] == [("light_scale", 0.25), ("bumpfactor", 3.5)],
+          f"edited parameters are written back, not CA's defaults ({got[0]})")
+    check(got[1] == [],
+          "an object that had no parameters still has none - the "
+          f"exporter does not hand it a default block ({got[1]})")
+    check([(n, tuple(round(x, 4) for x in v))
+           for n, v in result.meshes[0].vec4_params]
+          == [("specfactor", (1.5, 0.2, 0.3, 0.4))],
+          "the RGBA parameter is written back unclamped, so a colour "
+          "swatch in the panel never costs the file a value")
+
+    # ---- an object built in Blender still gets CA's default block ----
+    reset_scene()
+    bpy.ops.mesh.primitive_cube_add()
+    fresh = bpy.context.active_object
+    check(not fresh.rmv2.shader_params_initialized,
+          "a new object's parameter list is not marked as coming from a "
+          "file")
+    out = os.path.join(tmpdir, "fresh.animatable_rigid_model")
+    export_arm.export_file(bpy.context, out, {
+        "source": "SELECTED", "apply_modifiers": True,
+        "global_scale": 1.0})
+    fresh_result = armf.load(open(out, "rb").read())
+    check(len(fresh_result.meshes[0].float_params)
+          == len(armf.DEFAULT_FLOAT_PARAMS),
+          "a mesh that was never imported is written with the vanilla "
+          "parameter block, so it is not unlit in game "
+          f"({len(fresh_result.meshes[0].float_params)} parameters)")
+
+    # ---- VWM: one block for the file, so it is the root's -------------
+    reset_scene()
+    arm_obj = _import_empire_skeleton(tmpdir)
+    frames = rmv2_skeleton.bind_frames_in_game_space(arm_obj, 1.0)
+    cube = make_cube_mesh(0)
+    tris = cube.indices.reshape(-1, 3)
+    model = wfmt.VwmFile(version=1)
+    # Napoleon's battle outfit carries a different set from Empire's line
+    # infantry, which is why these are kept rather than rebuilt.
+    model.float_params = [("light_scale", 0.5), ("specpower", 4.0)]
+    model.vec4_params = [("colourmapfactor", (0.2, 0.4, 0.6, 0.8))]
+    # colourmapfactor, rimcolor and specfactor are the only four-component
+    # parameters in the corpus, and all three are colours - hence the
+    # swatch. See properties.RMV2ShaderParam.vector.
+    model.parts = [make_vwm_part("unit_body01", cube.positions,
+                                 cube.normals, cube.uv0, tris, frames,
+                                 [(0, 1.0)])]
+    path = os.path.join(tmpdir, "params_lod1.variant_weighted_mesh")
+    with open(path, "wb") as handle:
+        handle.write(wfmt.save(model))
+
+    root, _, _ = import_vwm.import_file(bpy.context, path, {
+        "build_materials": False, "texture_root": "", "global_scale": 1.0})
+    got = [(e.name, round(e.value, 4)) for e in root.rmv2.shader_params
+           if e.kind == "FLOAT"]
+    check(got == [("light_scale", 0.5), ("specpower", 4.0)],
+          f"the file-wide block landed on the root collection ({got})")
+    mesh_objs = [o for o in root.all_objects if o.type == "MESH"]
+    check(not mesh_objs[0].rmv2.shader_params,
+          "and not on the mesh, which has no block of its own in this "
+          "format")
+
+    root.rmv2.shader_params[0].value = 0.75
+    for obj in mesh_objs:
+        obj.select_set(True)
+    bpy.context.view_layer.objects.active = mesh_objs[0]
+    out = os.path.join(tmpdir, "params_out.variant_weighted_mesh")
+    export_vwm.export_file(bpy.context, out, {
+        "source": "AUTO", "apply_modifiers": True, "global_scale": 1.0})
+    written = wfmt.load(open(out, "rb").read())
+    check([(n, round(v, 4)) for n, v in written.float_params]
+          == [("light_scale", 0.75), ("specpower", 4.0)],
+          "the root's edited block is what gets written "
+          f"({written.float_params})")
+
+
+def arm_skeleton_name_case(tmpdir):
+    """Neither ARM format names a skeleton, so the importer must not
+    invent one.
+
+    It used to write `<stem>.anim` unconditionally, which put
+    "mountainb.anim" on a Napoleon campaign mountain - a static piece of
+    scenery with no bone index on any object.
+    """
+    print("\n=== ARM does not name a skeleton ===")
+    import shutil
+    from io_scene_rmv2 import arm_format as armf
+    from io_scene_rmv2 import import_arm
+
+    mountain = os.path.join(SAMPLES, "napoleon", "mountainb.rigid_model")
+    cannon = os.path.join(
+        SAMPLES, "shogun2",
+        "naval_cannon_12lb_lod4.animatable_rigid_model")
+    if not (os.path.isfile(mountain) and os.path.isfile(cannon)):
+        print("  (skipped - samples not present)")
+        return
+
+    # Scenery: no object carries a bone index, so it rides nothing.
+    model = armf.load(open(mountain, "rb").read())
+    check(all(m.bone_index is None for m in model.meshes),
+          "a plain .rigid_model has no bone index on any object")
+    reset_scene()
+    root, _, _ = import_arm.import_file(bpy.context, mountain, {
+        "build_materials": False, "texture_root": "",
+        "attach_armature": False, "global_scale": 1.0})
+    check(root.rmv2.skeleton_name == "",
+          f"so it gets no skeleton name "
+          f"(got {root.rmv2.skeleton_name!r})")
+
+    # Animatable, but nothing beside it to check against: still no guess.
+    reset_scene()
+    root, _, warnings = import_arm.import_file(bpy.context, cannon, {
+        "build_materials": False, "texture_root": "",
+        "attach_armature": False, "global_scale": 1.0})
+    check(root.rmv2.skeleton_name == "",
+          f"an animatable model with no sibling .anim gets none either "
+          f"(got {root.rmv2.skeleton_name!r})")
+    check(any("does not name its skeleton" in w for w in warnings),
+          f"and says so rather than staying silent ({warnings})")
+
+    # The convention is only used when the file is there to be checked.
+    work = os.path.join(tmpdir, "sibling")
+    os.makedirs(work, exist_ok=True)
+    shutil.copy(cannon, os.path.join(
+        work, "cannon.animatable_rigid_model"))
+    with open(os.path.join(work, "cannon.anim"), "wb") as handle:
+        handle.write(b"")
+    reset_scene()
+    root, _, _ = import_arm.import_file(
+        bpy.context, os.path.join(work, "cannon.animatable_rigid_model"), {
+            "build_materials": False, "texture_root": "",
+            "attach_armature": False, "global_scale": 1.0})
+    check(root.rmv2.skeleton_name == "cannon.anim",
+          f"a .anim of the same name beside it is a checked fact, so it "
+          f"is used (got {root.rmv2.skeleton_name!r})")
+
+
+def vmpf_library_visibility_case(tmpdir):
+    """A library .variant_part_mesh opens as one prop, not a heap.
+
+    Vertex format 2 packs many unrelated props into one file -
+    equipment/mesh1 has 52 of them across 142 parts - and every one sits
+    at the origin, so showing the lot is a pile rather than a model.
+    """
+    print("\n=== library .variant_part_mesh visibility ===")
+    import copy
+    from io_scene_rmv2 import import_vmpf
+    from io_scene_rmv2 import vmpf_format as vmf
+    reset_scene()
+
+    sample = os.path.join(SAMPLES, "shogun2",
+                          "cine_farmerhat.variant_part_mesh")
+    if not os.path.isfile(sample):
+        print("  (skipped - sample not present)")
+        return
+
+    model = vmf.load(open(sample, "rb").read())
+    check(model.vertex_format == vmf.VF_RIGID_NAMED,
+          "the sample is a library file")
+    template = model.parts[0]
+
+    # equipment/mesh1 in miniature: three props, two of them laddered,
+    # and one prop whose ladder starts at lod2 rather than lod1.
+    model.parts = []
+    for prop, levels in (("rigid_equip_hat", (1, 2)),
+                         ("rigid_equip_yumi", (2, 3)),
+                         ("rigid_equip_lone", (None,))):
+        for lod in levels:
+            part = copy.deepcopy(template)
+            part.name = prop if lod is None else "%s_lod%d" % (prop, lod)
+            model.parts.append(part)
+
+    path = os.path.join(tmpdir, "mesh1.variant_part_mesh")
+    with open(path, "wb") as handle:
+        handle.write(vmf.save(model))
+
+    root, stats, _ = import_vmpf.import_file(bpy.context, path, {
+        "build_materials": False, "texture_root": "", "global_scale": 1.0})
+    objs = [o for o in root.all_objects if o.type == "MESH"]
+    check(stats["meshes"] == 5, f"all 5 parts import ({stats['meshes']})")
+    visible = [o.name for o in objs if o.visible_get()]
+    check(len(visible) == 1,
+          f"exactly one object is visible ({visible})")
+    check(stats["hidden"] == 4, f"and 4 were hidden ({stats['hidden']})")
+
+    # Nothing is deleted - export still writes every part.
+    check(len(objs) == 5, "the rest are hidden, not dropped")
+
+    # The per-LOD-collection hider must not also run: it would take away
+    # levels of the very prop being looked at.
+    layer = bpy.context.view_layer.layer_collection.children[root.name]
+    shown = [c.name for c in root.children
+             if not layer.children[c.name].hide_viewport]
+    check(len(shown) == len(list(root.children)),
+          f"LOD collections are all left shown ({shown})")
+
+    # A non-library file is unaffected: its parts ARE its ladder, so the
+    # normal per-collection hider is still the right one.
+    reset_scene()
+    plain = vmf.load(open(sample, "rb").read())
+    plain.vertex_format = vmf.VF_RIGID
+    for part in plain.parts:
+        part.name = ""
+    plain.parts = [copy.deepcopy(plain.parts[0]) for _ in range(3)]
+    path = os.path.join(tmpdir, "plain.variant_part_mesh")
+    with open(path, "wb") as handle:
+        handle.write(vmf.save(plain))
+    root, stats, _ = import_vmpf.import_file(bpy.context, path, {
+        "build_materials": False, "texture_root": "", "global_scale": 1.0})
+    check(stats.get("hidden", 0) == 0,
+          "a non-library file hides no objects")
+    layer = bpy.context.view_layer.layer_collection.children[root.name]
+    hidden_cols = [c.name for c in root.children
+                   if layer.children[c.name].hide_viewport]
+    check(len(hidden_cols) == len(list(root.children)) - 1,
+          f"it hides all but the finest LOD collection, as before "
+          f"({hidden_cols})")
+
+
+def vwm_ladder_export_case(tmpdir):
+    """A .variant_weighted_mesh ladder goes back out as several files.
+
+    The importer merges a unit's `_lod1`..`_lod4` into one model, so an
+    export that wrote only the level in the dialog wrote a quarter of
+    what came in - and said nothing about it.
+    """
+    print("\n=== .variant_weighted_mesh ladder export ===")
+    import shutil
+    from io_scene_rmv2 import export_vwm, import_vwm
+    from io_scene_rmv2 import vwm_format as wfmt
+    reset_scene()
+
+    sample = os.path.join(SAMPLES, "empire",
+                          "euro_equipment.variant_weighted_mesh")
+    if not os.path.isfile(sample):
+        print("  (skipped - sample not present)")
+        return
+
+    work = os.path.join(tmpdir, "ladder")
+    os.makedirs(work, exist_ok=True)
+    for level in (1, 4):
+        path = os.path.join(
+            work, "myunit_lod%d.variant_weighted_mesh" % level)
+        shutil.copy(sample, path)
+        import_vwm.import_file(bpy.context, path, {
+            "build_materials": False, "texture_root": "",
+            "global_scale": 1.0})
+
+    root = bpy.data.collections["myunit"]
+    levels = sorted(c.rmv2.lod_level for c in root.children)
+    check(levels == [0, 3],
+          f"two files imported into one model as LOD 0 and 3 ({levels})")
+    bpy.context.view_layer.active_layer_collection = (
+        bpy.context.view_layer.layer_collection.children[root.name])
+
+    # CA numbers from 1 and the importer shifts down, so this shifts back
+    # - and a name the user typed with a suffix already on it is stripped.
+    check(os.path.basename(export_vwm.ladder_path("a/unit.vwm", 3))
+          == "unit_lod4.vwm",
+          "Blender's LOD 3 is written as CA's _lod4")
+    check(os.path.basename(export_vwm.ladder_path("a/unit_lod1.vwm", 0))
+          == "unit_lod1.vwm",
+          "and a _lodN the user already typed is not doubled up")
+
+    out = os.path.join(work, "out")
+    os.makedirs(out, exist_ok=True)
+    target = os.path.join(out, "myunit.variant_weighted_mesh")
+
+    # Off: one file, and it must say what it left behind.
+    _, warnings = export_vwm.export_file(bpy.context, target, {
+        "source": "AUTO", "lod_level": 0, "apply_modifiers": True,
+        "global_scale": 1.0, "auto_lods": False})
+    check(len(os.listdir(out)) == 1, "one level exports one file")
+    check(any("also has LOD 3" in w for w in warnings),
+          f"and warns that the rest of the model was not written "
+          f"({warnings})")
+
+    # On: the whole ladder, under CA's names.
+    for name in os.listdir(out):
+        os.remove(os.path.join(out, name))
+    stats, warnings, written = export_vwm.export_ladder(
+        bpy.context, target, {
+            "source": "AUTO", "apply_modifiers": True,
+            "global_scale": 1.0, "auto_lods": False})
+    names = sorted(os.path.basename(p) for p in written)
+    check(names == ["myunit_lod1.variant_weighted_mesh",
+                    "myunit_lod4.variant_weighted_mesh"],
+          f"the ladder writes one file per level, CA-named ({names})")
+    check(stats["files"] == 2, "both counted")
+    check(not warnings,
+          f"and nothing is being left behind, so no warning ({warnings})")
+    for name in names:
+        model = wfmt.load(open(os.path.join(out, name), "rb").read())
+        check(len(model.parts) + len(model.attachments) > 0,
+              f"{name} has content")
+
+
+def vmpf_material_and_lod_case(tmpdir):
+    """The .variant_part_mesh panel gaps, and the .anim-less VWM import.
+
+    Four things a manual pass turned up, each of which looked like the
+    importer had failed when it had not.
+    """
+    print("\n=== .variant_part_mesh panel + prop-only VWM ===")
+    from io_scene_rmv2 import capabilities, import_vmpf, import_vwm
+    from io_scene_rmv2 import vmpf_format as vmf
+    reset_scene()
+
+    sample = os.path.join(SAMPLES, "shogun2",
+                          "cine_farmerhat.variant_part_mesh")
+    if not os.path.isfile(sample):
+        print("  (skipped - sample not present)")
+        return
+
+    root, _, _ = import_vmpf.import_file(bpy.context, sample, {
+        "build_materials": False, "texture_root": "", "global_scale": 1.0})
+    mesh = [o for o in root.all_objects if o.type == "MESH"][0]
+
+    # A part's material is three names and nothing else - the panel used
+    # to show neither those nor any texture slot, which reads as a
+    # failed import rather than as a format with no textures.
+    names = [entry.name for entry in mesh.rmv2.material_names]
+    check(names == ["default", "default", "default"],
+          f"a part's three material names are on the mesh ({names})")
+    check("material_names" in capabilities.object_caps(mesh),
+          "and the panel offers them")
+    check("textures" not in capabilities.object_caps(mesh),
+          "while texture slots stay absent - the format has none")
+
+    # A library names its materials per part, so the file-level list is
+    # empty and the model panel should not show an empty box.
+    check(list(root.rmv2.material_names) == [],
+          "a library file's own material list is empty")
+
+    # Its parts are the ladder, so Generate LODs applies and the rows
+    # should arrive populated, as they do after an RMV2 import.
+    rows = [(r.vertex_format, round(r.decimate_ratio, 3))
+            for r in root.rmv2.lod_overrides]
+    check(len(rows) == 4 and rows[0][1] == 1.0 and rows[3][1] == 0.125,
+          f"auto-LOD rows start populated for .variant_part_mesh ({rows})")
+    check(all(fmt == "AUTO" for fmt, _ in rows),
+          "left on Auto - this format's other layout is rigid, and "
+          "forcing a far level to it would unskin the part")
+
+    # A .variant_part_mesh does have a ladder, so its LODs keep a level.
+    lod = [c for c in root.children][0]
+    check("lod_levels" in capabilities.collection_caps(root),
+          "so its LOD collections still show a LOD Level")
+    check(lod.rmv2.lod_level >= 0, "and have one")
+
+    # An .animatable_rigid_model does not: one file is one LOD.
+    root.rmv2.version = "ARM_5"
+    check("lod_levels" not in capabilities.collection_caps(root),
+          "an .animatable_rigid_model model shows a message instead of a "
+          "LOD Level, since one file is one LOD")
+
+    # A .variant_weighted_mesh of nothing but props has no skinned part,
+    # so it imports with no armature at all - and used to crash on it.
+    reset_scene()
+    equipment = os.path.join(SAMPLES, "empire",
+                             "euro_equipment.variant_weighted_mesh")
+    if not os.path.isfile(equipment):
+        return
+    check(not [o for o in bpy.data.objects if o.type == "ARMATURE"],
+          "no armature in the scene")
+    root, stats, warnings = import_vwm.import_file(bpy.context, equipment, {
+        "build_materials": True, "texture_root": "", "global_scale": 1.0})
+    check(stats["attachments"] > 0,
+          f"a file of nothing but props imports without a skeleton "
+          f"({stats['attachments']} attachments)")
+    texture_warnings = [w for w in warnings if "Texture Root" in w]
+    check(texture_warnings and "Preferences" in texture_warnings[0],
+          "and the no-textures warning says where the setting actually "
+          "is, in the dialog and in Preferences")
+
+
+def lod_is_derived_case(tmpdir):
+    """A collection is a LOD because of where it sits, not a flag.
+
+    There used to be two checkboxes, which meant "root and LOD at once"
+    was a reachable state that had to be guarded. One checkbox makes it
+    unreachable.
+    """
+    print("\n=== a LOD is any child of a root ===")
+    from io_scene_rmv2 import capabilities
+    reset_scene()
+
+    root = bpy.data.collections.new("model")
+    bpy.context.scene.collection.children.link(root)
+    root.rmv2.is_rmv2_root = True
+    child = bpy.data.collections.new("model_lod1")
+    root.children.link(child)
+
+    check(capabilities.is_lod(child),
+          "a collection inside a model root is a LOD, with nothing set "
+          "on it")
+    check(not capabilities.is_lod(root),
+          "and the root itself is not a LOD")
+    check(capabilities.parent_root_of(child) == root,
+          "the LOD knows which model it belongs to")
+
+    loose = bpy.data.collections.new("elsewhere")
+    bpy.context.scene.collection.children.link(loose)
+    check(not capabilities.is_lod(loose),
+          "a collection outside any root is not a LOD")
+
+    # The state that used to need guarding.
+    child.rmv2.is_rmv2_root = True
+    check(not capabilities.is_lod(child),
+          "ticking Model Root on a child stops it being a LOD - the "
+          "contradictory state cannot be reached")
+    check(capabilities.find_root(child) == child,
+          "it is its own model now")
+    check([c for c in export_rmv2._lod_children(root)] == [],
+          "and its parent stops counting it as a level")
+    child.rmv2.is_rmv2_root = False
+
+    # A ladder built by hand, with nobody opening the panel.
+    for level in (2, 3):
+        root.children.link(bpy.data.collections.new("model_lod%d" % level))
+    levels = [level for level, _ in export_rmv2._lod_children(root)]
+    check(levels == [1, 2, 3],
+          f"levels come from the names while LOD Level is still 0 "
+          f"({levels})")
+
+    child.rmv2.lod_level = 7
+    levels = [level for level, _ in export_rmv2._lod_children(root)]
+    check(levels == [2, 3, 7],
+          f"and the LOD Level field wins once it is set ({levels})")
+
+
+def vertex_format_gating_case(tmpdir):
+    """The Vertex Format list is built per object from its container.
+
+    Filtering an enum by a callable is how a mesh silently changes format
+    when its root's Version is edited, so the checks here are mostly
+    about what must NOT happen.
+    """
+    print("\n=== vertex format follows the container ===")
+    from io_scene_rmv2 import capabilities
+    reset_scene()
+
+    def mesh_in(version):
+        root = bpy.data.collections.new("vf_%s" % version)
+        bpy.context.scene.collection.children.link(root)
+        root.rmv2.is_rmv2_root = True
+        root.rmv2.version = version
+        bpy.ops.mesh.primitive_cube_add()
+        obj = bpy.context.active_object
+        for col in list(obj.users_collection):
+            col.objects.unlink(obj)
+        root.objects.link(obj)
+        return root, obj
+
+    # Every entry carries a permanent number, and they are the numbers
+    # Blender had already auto-assigned - so a .blend saved before this
+    # change reads back as the same format.
+    values = [row[3] for row in rmv2_properties.VERTEX_FORMAT_ITEMS]
+    check(values == list(range(len(values))),
+          "vertex format numbers are 0..n in the original order, so old "
+          f".blend files still resolve ({values})")
+
+    root, obj = mesh_in("VMPF_3")
+    keys = capabilities.vertex_format_keys(obj)
+    check(set(keys) == {"AUTO", "VMPF_SKINNED", "VMPF_RIGID"},
+          f"a .variant_part_mesh mesh is offered only its own three ({keys})")
+    check("SWAY" not in keys,
+          "and not Sway, which its format has no number for")
+
+    root, obj = mesh_in("8")
+    keys = capabilities.vertex_format_keys(obj)
+    check("SWAY" in keys and "VEGETATION" in keys,
+          "an RMV2 mesh keeps the full RMV2 list")
+    check("VMPF_SKINNED" not in keys,
+          "and is not offered a .variant_part_mesh layout")
+
+    # The version must NOT narrow it: Warhammer 3 ships Weighted as the
+    # far LOD of a Cinematic mesh, and v1/v7 files mix eras freely.
+    for version in ("1", "2", "5", "7", "8"):
+        _, mesh = mesh_in(version)
+        keys = set(capabilities.vertex_format_keys(mesh))
+        check(keys == set(capabilities._RMV2_VERTEX_FORMATS),
+              f"RMV2 v{version} offers the same list - the version does "
+              "not constrain the layout")
+
+    # An object not yet in a root is the state every importer builds its
+    # meshes in; narrowing there would make assigning the format the file
+    # actually said raise.
+    bpy.ops.mesh.primitive_cube_add()
+    loose = bpy.context.active_object
+    check(capabilities.root_of(loose) is None,
+          "a mesh outside any root has no container")
+    loose.rmv2.vertex_format = "VMPF_SKINNED"
+    check(loose.rmv2.vertex_format == "VMPF_SKINNED",
+          "so it accepts any format, and importers never fail on one")
+
+    # Moving a mesh between models fires no callback, so its format can
+    # outlive its container. It has to stay readable.
+    root, _ = mesh_in("8")
+    root.objects.link(loose)
+    check(loose.rmv2.vertex_format == "VMPF_SKINNED",
+          "a mesh moved into another model keeps its format rather than "
+          "resolving against a list it is not in")
+    shown = [row[0] for row in
+             rmv2_properties._vertex_format_items(loose.rmv2, bpy.context)]
+    check(shown[-1] == "VMPF_SKINNED" and "SWAY" in shown,
+          f"and it is pinned onto that model's list so it can be seen "
+          f"and changed ({len(shown)} entries)")
+
+    # Changing the Version inside one container must leave a deliberate
+    # choice alone - this is also the move that would expose a
+    # number-remap bug.
+    _, mesh = mesh_in("8")
+    mesh.rmv2.vertex_format = "SWAY"
+    root = capabilities.root_of(mesh)
+    for version in ("7", "5", "2", "8"):
+        root.rmv2.version = version
+        check(mesh.rmv2.vertex_format == "SWAY",
+              f"still Sway after the root moved to v{version}")
+
+    # Changing *container* is different: the old layout is a number the
+    # new container cannot write, so it converts rather than lingering.
+    row = root.rmv2.lod_overrides.add()
+    row.vertex_format = "WEIGHTED"
+    root.rmv2.version = "VMPF_3"
+    check(mesh.rmv2.vertex_format == "AUTO",
+          "a mesh whose format the new container cannot hold converts to "
+          "Auto")
+    check(row.vertex_format == "AUTO",
+          "and so does an auto-LOD override row")
+    shown = [r[0] for r in
+             rmv2_properties._vertex_format_items(mesh.rmv2, bpy.context)]
+    check(shown == ["AUTO", "VMPF_SKINNED", "VMPF_RIGID"],
+          "leaving the dropdown exactly the new container's, with no "
+          f"leftover from the old one ({shown})")
+
+    # The auto-LOD override column is a second vertex-format dropdown and
+    # gets the same list; it used to offer all 18 whatever the model was.
+    rows = [r[0] for r in
+            rmv2_properties._lod_override_vertex_format_items(
+                row, bpy.context)]
+    check(rows == ["AUTO", "VMPF_SKINNED", "VMPF_RIGID"],
+          f"override rows follow the container too ({rows})")
+
+
+def format_capabilities_case(tmpdir):
+    """The panels are drawn from capabilities.py, so what a format can
+    hold is asserted here rather than read off a screenshot: a setting
+    the exporter would silently drop must not be offered."""
+    print("\n=== per-format panel capabilities ===")
+    from io_scene_rmv2 import capabilities
+    reset_scene()
+
+    def root_for(version):
+        root = bpy.data.collections.new("caps_%s" % version)
+        bpy.context.scene.collection.children.link(root)
+        root.rmv2.is_rmv2_root = True
+        root.rmv2.version = version
+        return root
+
+    # ---- collection: which containers have a LOD ladder at all -------
+    for version, wanted, unwanted in (
+            ("8", {"lod_ladder", "auto_lods", "quality_level",
+                   "attach_points", "camera_distance"}, set()),
+            ("6", {"lod_ladder", "auto_lods", "attach_points"},
+             {"quality_level"}),
+            ("2", {"lod_ladder", "auto_lods"},
+             {"quality_level", "attach_points"}),
+            # Its block is per object, so the root does not offer one.
+            ("ARM_5", set(), {"lod_ladder", "auto_lods", "camera_distance",
+                              "quality_level", "attach_points",
+                              "shader_params"}),
+            # Its parts are the ladder, so the decimator applies; it
+            # has nowhere to keep a camera distance or a quality level.
+            ("VMPF_3", {"lod_ladder", "auto_lods", "shader_params"},
+             {"camera_distance", "quality_level"}),
+            # File-wide block, and with no texture slots or material id
+            # it is most of what this format says about the surface.
+            ("VWM_1", {"shader_params"},
+             {"lod_ladder", "auto_lods", "camera_distance"}),
+    ):
+        caps = capabilities.collection_caps(root_for(version))
+        check(wanted <= caps and not (unwanted & caps),
+              "%s: collection offers %s and not %s (got %s)"
+              % (version, sorted(wanted) or "nothing extra",
+                 sorted(unwanted) or "nothing", sorted(caps)))
+
+    # ---- object: what each container writes per mesh -----------------
+    reset_scene()
+    cases = (
+        # RMV2 addresses its parameters by index rather than by name, so
+        # they are not this list; they stay in extra_json.
+        ("8", {"material_id", "alpha_mode", "shader_name", "textures",
+               "texture_directory", "filters", "vertex_format",
+               "matrix_index", "parent_matrix_index"}, {"shader_params"}),
+        # Shogun 2's material is fixed-width strings and a bone index.
+        ("2", {"shader_name", "textures", "matrix_index", "material_id"},
+         {"alpha_mode", "filters", "parent_matrix_index",
+          "texture_directory"}),
+        ("1", {"textures", "matrix_index"},
+         {"shader_name", "alpha_mode", "filters"}),
+        # A flat object list: textures, a bone and a parameter block.
+        ("ARM_5", {"textures", "matrix_index", "shader_params"},
+         {"material_id", "alpha_mode", "shader_name", "filters",
+          "vertex_format"}),
+        # Object versions 0-3 have no parameter block: the texture names
+        # are followed straight by the vertex count.
+        ("ARM_3", {"textures", "matrix_index"}, {"shader_params"}),
+        # Three fixed "default" material names, so no texture slots.
+        ("VMPF_3", {"vertex_format", "matrix_index"},
+         {"textures", "material_id", "alpha_mode", "shader_name",
+          "shader_params"}),
+    )
+    for version, wanted, unwanted in cases:
+        root = root_for(version)
+        bpy.ops.mesh.primitive_cube_add()
+        obj = bpy.context.active_object
+        for col in list(obj.users_collection):
+            col.objects.unlink(obj)
+        root.objects.link(obj)
+        # A weighted mesh, so the VWM attachment path is not taken.
+        obj.vertex_groups.new(name="bone_0")
+        caps = capabilities.object_caps(obj)
+        check(wanted <= caps and not (unwanted & caps),
+              "%s: object offers %s and not %s (got %s)"
+              % (version, sorted(wanted), sorted(unwanted), sorted(caps)))
+
+    # A .variant_weighted_mesh part with no vertex groups is an
+    # attachment - an ARM object in all but name - so it gets ARM's row.
+    root = root_for("VWM_1")
+    bpy.ops.mesh.primitive_cube_add()
+    prop = bpy.context.active_object
+    for col in list(prop.users_collection):
+        col.objects.unlink(prop)
+    root.objects.link(prop)
+    caps = capabilities.object_caps(prop)
+    check("textures" in caps,
+          "an unrigged .variant_weighted_mesh part is an attachment, so it "
+          "keeps its texture slots (got %s)" % sorted(caps))
+
+    # ---- a non-RMV2 root does not keep RMV2's auto-LOD rows ----------
+    reset_scene()
+    root = root_for("8")
+    check(len(root.rmv2.lod_overrides) == 4,
+          "flagging a root auto-fills the four RMV2 rows")
+    capabilities.props.set_format_version(root.rmv2, "VMPF", 3)
+    check(len(root.rmv2.lod_overrides) == 0,
+          "recording a non-RMV2 container drops them again - the row that "
+          "was filled in before the importer said what it read (%d)"
+          % len(root.rmv2.lod_overrides))
+
+    # ---- every importer builds a LOD0 even with no ladder in the file
+    reset_scene()
+    from io_scene_rmv2 import arm_format as armf
+    from io_scene_rmv2 import import_arm
+    arm_path = os.path.join(tmpdir, "caps.animatable_rigid_model")
+    with open(arm_path, "wb") as handle:
+        handle.write(armf.save(make_arm_file(bone_indices=(1,))))
+    root, _, _ = import_arm.import_file(bpy.context, arm_path, {
+        "build_materials": False, "texture_root": "",
+        "attach_armature": False, "global_scale": 1.0})
+    levels = [c.rmv2.lod_level for c in root.children
+              if not c.rmv2.is_rmv2_root]
+    check(levels == [0],
+          "a format with no LOD ladder still gets a dummy LOD 0 (%s)"
+          % levels)
+
+
 def every_version_case(tmpdir):
     """Every version this add-on reads, it can also write - and the one
     a model was imported as is the one the exporter offers back."""
@@ -2688,8 +3703,8 @@ def every_version_case(tmpdir):
     reset_scene()
     arm_obj, _, _ = import_anim.import_file(bpy.context, v8_path, {
         "mode": "SKELETON", "global_scale": 1.0})
-    check(arm_obj.data.rmv2.anim_version == 8,
-          "the armature records the version it was imported from (got %d)"
+    check(arm_obj.data.rmv2.anim_version == "8",
+          "the armature records the version it was imported from (got %s)"
           % arm_obj.data.rmv2.anim_version)
 
     # ---- .rigid_model_v2 v5, which used to be import-only -------------
@@ -2726,9 +3741,9 @@ def every_version_case(tmpdir):
     root, stats, _ = import_arm.import_file(bpy.context, arm_path, {
         "build_materials": False, "texture_root": "",
         "attach_armature": False, "global_scale": 1.0})
-    check(root.rmv2.arm_version == 5,
-          "the collection records the object version (%d)"
-          % root.rmv2.arm_version)
+    check(rmv2_properties.format_version(root.rmv2, "ARM") == "5",
+          "the collection records the object version (%s)"
+          % root.rmv2.version)
     objs = [o for o in root.all_objects if o.type == "MESH"]
     for obj in objs:
         obj.select_set(True)
@@ -2998,6 +4013,18 @@ def main():
         shogun2_rmv2_case(tmpdir)
         shogun2_arm_case(tmpdir)
         vwm_case(tmpdir)
+        vwm_variant_slot_case(tmpdir)
+        rigid_attach_either_order_case(tmpdir)
+        vmpf_rigid_mount_case(tmpdir)
+        vmpf_auto_lod_case(tmpdir)
+        shader_params_case(tmpdir)
+        arm_skeleton_name_case(tmpdir)
+        vmpf_library_visibility_case(tmpdir)
+        vwm_ladder_export_case(tmpdir)
+        vmpf_material_and_lod_case(tmpdir)
+        lod_is_derived_case(tmpdir)
+        vertex_format_gating_case(tmpdir)
+        format_capabilities_case(tmpdir)
         every_version_case(tmpdir)
         vwm_attachment_case(tmpdir)
         vwm_requires_skeleton_case(tmpdir)

@@ -28,6 +28,9 @@ import numpy as np
 
 from . import export_rmv2, scene_layout, skeleton, utils
 from . import vmpf_format as vf
+from .properties import (chosen_version, read_material_names,
+                         root_format_version,
+                         shader_params_or_default)
 
 
 class VmpfExportError(Exception):
@@ -61,6 +64,28 @@ def _part_name_for(obj, level: int) -> str:
     if match:
         stem = match.group(1)
     return f"{stem}_lod{level + 1}"
+
+
+def _bone_index_for(obj, meta: dict) -> int:
+    """The bone a library part rides.
+
+    Prefers the live Child Of constraint the importer binds it with, so
+    re-hanging a prop off a different bone in Blender is what gets
+    written; falls back to the number stashed at import time for objects
+    that were never attached (no armature in the scene), and to -1
+    ("no mount") for anything hand-made.
+    """
+    for con in obj.constraints:
+        if (con.type == "CHILD_OF" and con.target is not None
+                and con.target.type == "ARMATURE" and con.subtarget):
+            index = skeleton.bone_index_by_name(con.target).get(
+                con.subtarget)
+            if index is not None:
+                return index
+    stored = obj.rmv2.matrix_index
+    if stored >= 0:
+        return stored
+    return int(meta.get("vmpf_bone_index", -1))
 
 
 def _is_library(objects) -> bool:
@@ -108,16 +133,31 @@ def _root_for(objects):
 
 
 def _gather_objects(context, options: dict):
-    """[(lod_level, [objects])], most detailed first."""
+    """[(lod_level, [objects], decimate_ratio)], most detailed first.
+
+    The ratio is 1.0 for a ladder the user set up by hand, and 0.5^level
+    (or whatever the root's override rows say) when Generate LODs is on:
+    this format's parts *are* its LOD ladder, exactly like .rigid_model_v2
+    's LOD table, so the same decimator drives both.
+    """
     root, lods = export_rmv2.gather_lods(context, options)
-    if lods:
-        out = [(info["level"], list(objects)) for info, objects in lods]
-        out.sort(key=lambda item: item[0])
-        if root is None:
-            root = _root_for([o for _, objs in out for o in objs])
-        return root, out
-    objects = [o for o in context.selected_objects if o.type == "MESH"]
-    return root or _root_for(objects), ([(0, objects)] if objects else [])
+    if not lods:
+        objects = [o for o in context.selected_objects if o.type == "MESH"]
+        root = root or _root_for(objects)
+        return root, ([(0, objects, 1.0)] if objects else [])
+
+    if root is None:
+        root = _root_for([o for objs in lods for o in objs[1]])
+    if options.get("auto_lods", False):
+        best = min(lods, key=lambda item: item[0]["level"])
+        overrides = root.rmv2.lod_overrides if root is not None else None
+        lods = export_rmv2.expand_auto_lods(
+            [best], max(2, options.get("auto_lod_count", 4)), overrides)
+
+    out = [(info["level"], list(objects), info.get("decimate_ratio", 1.0))
+           for info, objects in lods]
+    out.sort(key=lambda item: item[0])
+    return root, out
 
 
 def _use_rigid(armature, objects) -> bool:
@@ -151,8 +191,14 @@ def _bone_local(frames: dict, bone: int, points: np.ndarray,
     return (points - matrix[:3, 3]) @ rot_t
 
 
-def _build_part(context, obj, options, frames, warnings, rigid: bool):
-    """One Blender object -> one VmpfPart."""
+def _build_part(context, obj, options, frames, warnings, rigid: bool,
+                decimate_ratio: float = 1.0):
+    """One Blender object -> one VmpfPart.
+
+    `decimate_ratio` below 1 has extract_mesh_arrays run a temporary
+    Decimate modifier over the mesh, which is how a generated LOD ladder
+    gets its coarser levels.
+    """
     scale = options.get("global_scale", 1.0)
     # VMPF meshes are parented to the armature with an inverse that
     # cancels it, so the object's own local matrix is the model-space
@@ -160,7 +206,8 @@ def _build_part(context, obj, options, frames, warnings, rigid: bool):
     # format has no pivot field (same situation as Shogun 2's
     # .rigid_model_v2 - see export_rmv2.extract_mesh_arrays).
     arrays = export_rmv2.extract_mesh_arrays(
-        context, obj, dict(options, bone_local_space=True), warnings, 1.0)
+        context, obj, dict(options, bone_local_space=True), warnings,
+        decimate_ratio)
     if arrays is None:
         warnings.append(f"{obj.name}: no exportable faces; skipped")
         return None
@@ -304,7 +351,7 @@ def export_file(context, filepath: str, options: dict):
             if obj.type == "ARMATURE":
                 armature = obj
                 break
-    every_object = [o for _, objects in lods for o in objects]
+    every_object = [o for _, objects, _ in lods for o in objects]
     rigid = _use_rigid(armature, every_object)
     library = rigid and _is_library(every_object)
     if not rigid and armature is None:
@@ -319,23 +366,42 @@ def export_file(context, filepath: str, options: dict):
               if armature else {})
 
     model = vf.VmpfFile(
-        version=int(options.get("version", 3)),
+        version=int(chosen_version(
+            options, "version", root_format_version(root, "VMPF", "3"))),
         vertex_format=(vf.VF_RIGID_NAMED if library else
                        vf.VF_RIGID if rigid else vf.VF_SKINNED))
     # A library names its skeleton too - the props hang off its bones.
     model.skeleton_name = "" if (rigid and not library) else (
         options.get("skeleton_name", "")
         or (root.rmv2.skeleton_name if root is not None else ""))
-    model.material_names = ["default", "default", "default"]
+    # A library names its materials per part, so the file-level list
+    # stays empty there; everything else names them once, in the trailer.
+    if root is not None and root.rmv2.material_names_initialized:
+        model.material_names = read_material_names(root.rmv2)
+    else:
+        model.material_names = [] if library else ["default"] * 3
+    # File-wide named parameters, kept from the import. Unlike
+    # .variant_weighted_mesh there is no default to fall back on: every
+    # vanilla .variant_part_mesh read so far carries an empty block, so a
+    # model built in Blender gets one too rather than a borrowed set.
+    if root is not None:
+        model.float_params, model.vec4_params = shader_params_or_default(
+            root.rmv2, ((), ()))
 
+    if library and options.get("auto_lods", False):
+        raise VmpfExportError(
+            "Generate LODs cannot expand a library file: every part is "
+            "named in the file and each prop has its own ladder, so a "
+            "generated level would write the same stored name twice. "
+            "Set the ladder up as LOD collections instead")
     if library:
         _build_library(context, lods, options, frames, warnings, model)
     else:
-        for _, objects in lods:
+        for _, objects, ratio in lods:
             parts = []
             for obj in sorted(objects, key=lambda o: o.name):
                 part = _build_part(context, obj, options, frames, warnings,
-                                   rigid)
+                                   rigid, ratio)
                 if part is not None:
                     parts.append(part)
             if not parts:
@@ -374,7 +440,7 @@ def _build_library(context, lods, options, frames, warnings, model) -> None:
     contiguous and reshuffling them would be a needless diff.
     """
     entries = []
-    for level, objects in lods:
+    for level, objects, _ in lods:
         for obj in objects:
             entries.append((level, obj))
 
@@ -392,9 +458,12 @@ def _build_library(context, lods, options, frames, warnings, model) -> None:
             continue
         meta = _part_metadata(obj)
         part.name = _part_name_for(obj, level)
-        part.bone_index = int(meta.get("vmpf_bone_index", -1))
-        names = list(meta.get("vmpf_material_names") or [])
-        part.material_names = (names + ["default"] * 3)[:3]
+        part.bone_index = _bone_index_for(obj, meta)
+        if obj.rmv2.material_names_initialized:
+            part.material_names = read_material_names(obj.rmv2)
+        else:
+            names = list(meta.get("vmpf_material_names") or [])
+            part.material_names = (names + ["default"] * 3)[:3]
         model.parts.append(part)
 
 

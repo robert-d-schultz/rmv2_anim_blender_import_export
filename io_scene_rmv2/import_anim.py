@@ -41,6 +41,7 @@ import numpy as np
 from mathutils import Matrix, Quaternion, Vector
 
 from . import anim_format as af
+from .properties import set_anim_version
 from . import skeleton
 
 DEFAULT_BONE_LENGTH = 0.1
@@ -83,15 +84,18 @@ def local_matrix(translation, rotation_xyzw, scale: float) -> Matrix:
 # ---------------------------------------------------------------------------
 
 def _rmv2_root_of(collection):
-    """The RMV2 root a (LOD) collection belongs to, if any."""
+    """The model root a collection belongs to, if any.
+
+    A LOD is any collection sitting inside a root - there is no flag
+    saying so, see capabilities.parent_root_of.
+    """
     if collection.rmv2.is_rmv2_root:
         return collection
-    if collection.rmv2.is_lod:
-        for candidate in bpy.data.collections:
-            if candidate.rmv2.is_rmv2_root \
-                    and collection.name in {c.name
-                                            for c in candidate.children}:
-                return candidate
+    for candidate in bpy.data.collections:
+        if candidate.rmv2.is_rmv2_root \
+                and collection.name in {c.name
+                                        for c in candidate.children}:
+            return candidate
     return None
 
 
@@ -375,7 +379,7 @@ def _store_metadata(arm_obj, anim: af.AnimFile):
     s = arm_obj.data.rmv2
     if anim.skeleton_name:
         s.skeleton_name = anim.skeleton_name
-    s.anim_version = anim.version
+    set_anim_version(s, anim.version)
     s.anim_fps = anim.frame_rate
     s.anim_header_type = anim.header_type
     s.flags = ", ".join(anim.flags)
@@ -588,19 +592,36 @@ def rename_groups_and_attach(meshes, arm_obj, warnings,
                              is_building=False) -> tuple:
     """Rename bone_<i> vertex groups to the armature's bone names and
     attach each mesh - rigidly to its matrix_index bone (Child Of, no
-    vertex groups/armature modifier) for building-type destructible
-    pieces imported before this armature existed (see
-    import_rmv2.import_file's own matrix_index attach, used when the
-    armature already exists at RMV2-import time - this is the same
-    attach for the opposite import order), or via armature modifier +
-    parent for normally-skinned meshes. Returns (attached, renamed)."""
+    vertex groups/armature modifier) for a piece that rides one bone
+    whole, or via armature modifier + parent for normally-skinned
+    meshes. Returns (attached, renamed).
+
+    The rigid case is the mirror of the attach every importer does when
+    the armature already exists (import_rmv2, import_arm, import_vmpf
+    and import_vwm all call skeleton.attach_matrix_index_mesh), so a
+    model comes out the same whichever order its two files are opened
+    in.
+
+    It is not limited to Warhammer 3's destructible buildings, though
+    that is where it started. "No vertex groups, and a matrix_index" is
+    the definition of a piece welded to one bone in every format this
+    add-on reads - a Shogun 2 .animatable_rigid_model cannon barrel, a
+    .variant_part_mesh helmet, a .variant_weighted_mesh musket - and a
+    skinned mesh imported before its armature has bone_<i> groups, so it
+    cannot match. Gating this on the .anim being named "building" left
+    all the others holding a matrix_index that nothing ever acted on.
+
+    `is_building` is unused here now; the caller still computes it for
+    its own decisions, and it stays in the signature so the gate that
+    used to be here is visibly gone rather than quietly moved.
+    """
+    del is_building
     name_by_index = skeleton.bone_name_by_index(arm_obj)
     bone_names = {b.name for b in arm_obj.data.bones}
     attached = 0
     renamed = 0
     for obj in meshes:
-        if is_building and not obj.vertex_groups \
-                and obj.rmv2.matrix_index >= 0:
+        if not obj.vertex_groups and obj.rmv2.matrix_index >= 0:
             bone_name = name_by_index.get(obj.rmv2.matrix_index)
             if bone_name:
                 skeleton.attach_matrix_index_mesh(obj, arm_obj, bone_name)

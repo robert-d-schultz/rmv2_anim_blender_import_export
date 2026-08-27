@@ -64,6 +64,49 @@ per mesh:
 Meshes are stored LOD by LOD, each LOD header pointing at the first mesh
 section of its own run.
 
+### The parent matrix index is the collider's bone
+
+The `i32` after the matrix index, which AssetEditor calls
+`ParentMatrixIndex`. Reading it as "the bone above the one this mesh
+rides" is wrong, and the whole of Warhammer 3 says so.
+
+Sweeping all **23 618** vanilla models (the 111 packs in the game's own
+`data/manifest.txt`, extracted with RPFM so the compressed entries are
+covered; no parse failures) finds **132 246** meshes carrying the field
+and exactly **81** where it is not `-1`. Every one of those 81:
+
+* is a mesh named `collider_*`;
+* sits in one of six `*_cloth_cloak_01.rigid_model_v2` files, across the
+  `humanoid01`, `humanoid01c` and `humanoid01e` skeletons;
+* has its own **matrix index at `-1`** — so this is not a parent *of*
+  that bone, it is the mesh's own attachment, kept in the other slot.
+
+58 of the 81 are named after a body part, and all 58 name exactly the
+bone their value points at:
+
+| Collider mesh | Value | Bone in the skeleton |
+| --- | --- | --- |
+| `collider_root` | 1 | `root` |
+| `collider_spine_0` | 8 | `spine_0` |
+| `collider_upperleg_left` | 9 | `upperleg_left` |
+| `collider_lowerleg_right` | 12 | `lowerleg_right` |
+| `collider_spine_2` | 18 | `spine_2` |
+| `collider_upperarm_right` | 24 | `upperarm_right` |
+| `collider_skirt_back_left_1` | 66 | `skirt_back_left_1` |
+
+The remaining 23 are numbered rather than named (`collider_007`,
+`collider_soft_020`), so they cannot confirm themselves, but they
+resolve to the same sort of bones — arms, spine, legs, skirt.
+
+So a cloth cloak ships as the simulated cloth, the rendered cloak, and a
+set of rigid proxy volumes for the sim to bounce the cloth off; each
+proxy names the bone it rides here. Both other meshes in those files
+leave the field at `-1`.
+
+The other games have not been swept. The tooling is in
+[tools/](../tools/): `python tools/sweep_field.py parent_matrix_index
+<game> "<install>"`.
+
 ## File header — 140 bytes
 
 | Offset | Type | Field |
@@ -168,8 +211,8 @@ cloth, trees, grass and the rest.
 | 546 | `u8[2]` | Padding |
 | 548 | `f32[3]` | Pivot |
 | 560 | `f32[12] x 3` | Three 3x4 transform matrices |
-| 704 | `i32` | Matrix index — the bone this mesh is welded to, -1 for none |
-| 708 | `i32` | Parent matrix index |
+| 704 | `i32` | Matrix index — the bone this mesh is welded to, -1 for none. Shown as **Bone Index** in Blender, which is what the other three containers call it |
+| 708 | `i32` | Parent matrix index — the bone a **cloth-physics collider** follows. See below. Shown as **Collider Bone** |
 | 712 | `u32[6]` | Counts: attachment points, textures, string params, float params, int params, vec4 params |
 | 736 | `u8[124]` | Padding |
 
@@ -204,6 +247,30 @@ Parameters are addressed by index rather than by name:
 | Vec4 | 0 | Decal texture transform |
 
 Indices outside this list are read and written back unchanged.
+
+### Where a .variant_part_mesh keeps its material
+
+There are no textures in this format and no material id. A material is
+three names, and **where** they sit depends on the vertex format, not on
+the version:
+
+| | Library (vertex format 2) | Normal (vertex format 0 or 1) |
+| --- | --- | --- |
+| Per part | name, bone index, **its own three material names** | nothing - parts carry no names |
+| Trailer | the skeleton name only, in an 80-byte field | `_TRAILER_SLOTS[version]` names |
+
+`_TRAILER_SLOTS` is `{0: 1, 2: 1, 3: 4}`, so only **version 3** keeps
+material names in the trailer at all: four slots, the first of which is
+the skeleton. A v0 or v2 non-library file has one slot, the skeleton, and
+therefore no material names anywhere.
+
+That split follows what the two shapes *are*. A normal file is one prop
+whose parts are its LOD levels, so one set of names covers it. A library
+is many unrelated props sharing a file - `equipment/mesh1` holds 52 of
+them across 142 parts - so each part needs its own.
+
+The Blender side puts them where the file does: on the mesh for a library
+part, on the model for a normal file.
 
 ## The short material headers
 
@@ -589,6 +656,12 @@ without it, closing instead with a bounding box, and holds static
 geometry. Objects are matched to their form by looking ahead in the file
 rather than by trusting its name.
 
+Which is why the two menu rows mean different things in each direction.
+Exporting, they are a real choice, and it belongs in the menu rather than
+in which extension the user happened to type. Importing, they are a
+browser filter over one operator: the file decides, so either row opens
+either form.
+
 The object shrinks as the versions go back. Everything below `uv2` sits
 at the same offset in all of them, so one reader covers the lot:
 
@@ -608,6 +681,39 @@ version words entirely, so the object count runs straight into the first
 name; it is detected by the *absence* of the magic where the first object
 should begin. One shipping file uses it
 (`enginemodels/cannon_test_model`).
+
+### The named parameter block
+
+From object version 4 each object carries its own block of named shader
+values: a count, then a u16-length UTF-16LE name and one `f32` per entry,
+then the same again for four-component entries. `light_scale`,
+`offsetu0`, `bumpfactor`, `specpower`, `glossfactor`, `specfactor`.
+
+The four-component list is colours. Across the sample corpus it holds
+exactly three names — `colourmapfactor`, `rimcolor` and `specfactor` —
+and every component of every one of them falls in 0..1, so Blender draws
+them as RGBA swatches. The property is soft-ranged rather than clamped,
+because "no vanilla file leaves 0..1" is a fact about the files read so
+far, not a rule the format states.
+
+It is **per object**, not per file, and vanilla proves the difference:
+Shogun 2's `naval_cannon_12lb_lod4` writes 13 float parameters and 3
+vec4s on three of its four objects, and an empty block on the fourth. The
+Blender side therefore keeps it on the mesh object, and an object that
+had none is written back with none — see
+[capabilities.py](../io_scene_rmv2/capabilities.py).
+
+`.variant_part_mesh` and `.variant_weighted_mesh` carry the same kind of
+block, but once for the whole file, ahead of the parts — so theirs is
+kept on the root collection instead. The sets differ per model rather
+than being a fixed default: Empire's `euro_line_infantry_lod4` has 13
+float parameters, `euro_equipment` 11, and Napoleon's
+`battleoutfit_lod1` a different 9 with no `offsetu0`/`offsetv0` at all.
+Every `.variant_part_mesh` read so far carries an empty block.
+
+`.rigid_model_v2` has parameter lists too, but addresses them by index
+rather than by name (see [Parameter slots](#parameter-slots)), so they
+are a different thing and stay in the preserved `extra_json`.
 
 Losing the magic costs the headerless reader its landmark for the
 bone-index lookahead, so for those files whether the objects carry one is
@@ -640,7 +746,7 @@ out of the file alone.
 
 | Vertex format | Stride | Contents |
 | --- | --- | --- |
-| 0 Rigid | 64 | float32 model-space positions, no skinning |
+| 0 Rigid | 64 | float32 positions, no skinning |
 | 1 Skinned | 48 (40 in v0) | Two influences; v0 has no tangent frame on the second |
 | 2 Rigid, named | 64 | As 0, each part prefixed with its own names |
 
@@ -649,6 +755,27 @@ bit-exactly, since nothing is quantized. It also carries a second UV set
 (ambient occlusion), imported as `UVMap_1` when non-zero. Which layout
 gets written comes from each mesh's own Vertex Format setting, stamped at
 import.
+
+A rigid part is not skinned, but it is not in model space either: it
+rides one bone whole, named by the signed index in its own header (-1 =
+none), and its vertices are stored **in that bone's space** — the same
+arrangement as an `.animatable_rigid_model` object. `cine_farmerhat`'s
+352 vertices sit in a 0.45 m box around the origin, not at head height.
+So a rigid part imports with a Child Of constraint on that bone and no
+vertex groups at all, and the constraint is what export reads back.
+
+The mounts are ordinary skeleton bone indices, not a separate palette:
+on `man_shogun` 1 and 3 are `Weapon1`/`Weapon3`, 14 is `Spine2` (every
+`_bp` backpack) and 20 is `Sashimono` (the banner poles). The three
+`Weapon` bones are parentless and sit at the world origin in the
+reference pose — they are placed by whatever animation is playing — so a
+prop on one of them belongs at the origin until an animation moves it.
+
+Because the parts are the ladder, Blender's Generate LODs (Decimate)
+drives this format exactly as it drives the `.rigid_model_v2` LOD table,
+off the same Auto-LOD Override rows. Library files are the exception:
+their parts are named in the file, so a generated level would write one
+prop's stored name twice, and the export refuses instead.
 
 **Library files.** A few `variantmodels/equipment/` files pack dozens of
 unrelated props into one container — `mesh1.variant_part_mesh` holds 52
@@ -711,6 +838,18 @@ CA's older `testdata` files, the same container from before the colour
 channel existed, do not have it, nor do the rigid objects in their
 attachment section. It is the same channel the rigid model gained going
 from 14 to 18 floats.
+
+**Variant slots.** One file holds every alternative a unit's variants can
+draw, and nothing in the container says which of them are answers to the
+same question: the part table is flat and a part carries no slot field.
+The name is the whole signal, and it is the same signal CA's own variant
+tables use, since the file gives them nothing else to address a part by.
+So the importer groups parts by name up to a trailing number —
+`<unit>_head01` … `<unit>_head04` are one slot, `Telescope` is a slot of
+one — and leaves the lowest-numbered member of each visible, closing the
+viewport eye on the rest. `euro_line_infantry_lod4` opens as 8 visible
+parts out of 16, which is one soldier. Nothing is deleted and export
+writes them all.
 
 **Attachments.** After the last part comes a second section: the props a
 unit hangs off a single bone. Each entry is a name and a bone index in
@@ -790,6 +929,12 @@ after a fixed string's terminator, simulation blocks and unknown
 parameter indices are all preserved rather than regenerated. The RMV2
 writer re-parses its own output before it touches disk, so a file that
 would not load back is never written.
+
+The [named parameter blocks](#the-named-parameter-block) are preserved
+*and* editable: they come in as a list in the panel the container puts
+them in and go back out as whatever is in that list, empty included.
+Everything else in this section is kept verbatim and has no UI, because
+it is not meant to be edited.
 
 The RMV2-era layouts follow the C# reference in
 [TheAssetEditor](https://github.com/donkeyProgramming/TheAssetEditor)

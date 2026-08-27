@@ -13,7 +13,7 @@ The scene it builds is the union of what the two importers build:
 
     <name>              collection, rmv2.is_rmv2_root
       <armature>        from the embedded .anim, with its action
-      <name>_lod0       collection, rmv2.is_lod
+      <name>_lod0       collection (any child of a root is a LOD)
         <object>        one mesh object per file object, each welded to
                         one bone with a Child Of constraint
 
@@ -29,6 +29,7 @@ import os
 from . import anim_format as anf
 from . import arm_format as armf
 from . import import_anim, import_arm, materials, scene_layout, skeleton
+from .properties import set_format_version
 
 
 class RmaImportError(Exception):
@@ -59,8 +60,14 @@ def import_file(context, filepath: str, options: dict):
             f"{stem}: no animation after the objects - this is a plain "
             "rigid model saved under the animated extension")
 
-    root = scene_layout.new_root(context, stem, stem)
-    root.rmv2.arm_version = arm.version
+    # This format carries its skeleton inside the same file, so the
+    # model is self-contained and the stem is a fair name for it - but
+    # if the embedded animation names one itself, that beats a guess.
+    # Empire's headerless v0 animations leave the field empty.
+    embedded_skeleton = (anim.skeleton_name if anim is not None
+                         and anim.skeleton_name else stem)
+    root = scene_layout.new_root(context, stem, embedded_skeleton)
+    set_format_version(root.rmv2, "ARM", arm.version)
     lod = scene_layout.new_lod(root, f"{stem}_lod0", 0)
 
     arm_obj = None

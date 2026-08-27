@@ -1,7 +1,7 @@
 """The collection layout every importer in this add-on builds.
 
     <name>              collection, rmv2.is_rmv2_root
-      <name>_lod0..N    collections, rmv2.is_lod
+      <name>_lod0..N    collections (a LOD is any child of a root)
         <object>        one or more mesh objects
 
 .rigid_model_v2 defined it; the Shogun 2 importers
@@ -51,16 +51,20 @@ def find_root(name: str):
 def find_or_new_lod(root, name: str, level: int):
     """The LOD collection for `level` under `root`, created if absent."""
     for child in root.children:
-        if child.rmv2.is_lod and child.rmv2.lod_level == level:
+        if not child.rmv2.is_rmv2_root and child.rmv2.lod_level == level:
             return child
     return new_lod(root, name, level)
 
 
 def new_lod(root, name: str, level: int):
-    """A fresh LOD collection under `root`."""
+    """A fresh LOD collection under `root`.
+
+    Nothing marks it as a LOD: being inside a root is what makes it one
+    (see capabilities.parent_root_of), so there is no flag here to fall
+    out of step with where the collection actually sits.
+    """
     col = bpy.data.collections.new(name)
     root.children.link(col)
-    col.rmv2.is_lod = True
     col.rmv2.lod_level = level
     return col
 
@@ -92,6 +96,34 @@ def show_only_most_detailed_lod(context, levels) -> None:
         layer = find_layer_collection(root_layer, col)
         if layer is not None:
             layer.hide_viewport = level != finest
+
+
+def hide_object(obj) -> None:
+    """Close an object's viewport eye, whatever the scene layout.
+
+    Reversible from the outliner, and it changes nothing about what gets
+    exported.
+    """
+    try:
+        obj.hide_set(True)
+    except RuntimeError:
+        # Not in the view layer (an unusual scene layout); the monitor
+        # icon is the next best thing.
+        obj.hide_viewport = True
+
+
+def show_only_first(objects) -> int:
+    """Leave the first object visible and hide the rest. Returns how many.
+
+    For a file that is a *library* - many unrelated props sharing one
+    container - where showing everything at once is a heap of models
+    stacked on the origin rather than a model.
+    """
+    hidden = 0
+    for obj in list(objects)[1:]:
+        hide_object(obj)
+        hidden += 1
+    return hidden
 
 
 def adopt_armature(root, armature) -> None:
