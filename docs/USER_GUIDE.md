@@ -70,81 +70,21 @@ The Total War Settings panels only show what the model's own format has somewher
 | Camera Distance | `.variant_part_mesh`, and formats with no ladder | The container has nowhere to keep one |
 | LOD Level | `.animatable_rigid_model` / `.rigid_model` | One file is one LOD, so the collection says so instead of offering a number with nothing to vary. `.variant_weighted_mesh` *does* keep one — its levels are separate `_lod1`..`_lod4` files that import into one model |
 
+Every format goes through the same root-collection-of-LOD-collections shape even when its file has no LOD ladder — `.animatable_rigid_model`, `.variant_weighted_mesh` and `.rigid_model_animation` all get a dummy LOD 0 — so the panels, the `.anim` importer and the exporters work the same way whatever the model came from.
+
+Going backwards can cost you something the older format has no room for — an Empire-era rigid-model object holds one texture name where a modern one holds four. The exporter writes what fits and tells you what it left out, rather than refusing.
+
 ### Vertex Format is per mesh, and follows the container
 
 **Vertex Format is a mesh setting, not a model setting**, because that is where the file keeps it. Vanilla models mix freely: Warhammer 3 ships units that are Cinematic up close and Weighted at distance, `maple_d` is Vegetation plus one Tree Billboard card, and `wef_oak_of_ages_part_b` is Static plus six Sway meshes.
 
-The dropdown is narrowed to what the model's **container** can store — an RMV2 mesh sees the RMV2 layouts, a `.variant_part_mesh` mesh sees only its own three. It is *not* narrowed by version, so an RMV2 model lists the Shogun 2 layouts whatever version it is. That is not an oversight: `army_banner_flag_general` is a v7 file storing the Shogun 2 layout, and `zen_garden_floor_stone_01` is a v1 file storing the modern Static one, so neither set belongs to one era. Working out the real per-version table needs a corpus census of several games — see TODO 9.
-
-The **Auto-LOD Override** rows have a Vertex Format column too, and it follows the same list.
-
-### Neither ARM format names its skeleton
-
-`.animatable_rigid_model` and `.rigid_model` have no skeleton field
-anywhere, so the importer will not invent one:
-
-- A plain `.rigid_model` carries no bone index on any object — that
-  is the whole of what "not animatable" means — so its **Skeleton**
-  is left empty. It is scenery; it rides nothing.
-- An `.animatable_rigid_model` does ride a skeleton, but the file does
-  not say which. CA's convention is an `.anim` of the same name sitting
-  beside it, so that name is used **only when that file actually
-  exists**. Otherwise you get an empty Skeleton and a warning, and can
-  fill it in yourself on the model collection.
-
-Filling it in regardless is what used to put `mountainb.anim` on a
-Napoleon campaign mountain that has no bones at all.
-
-`.rigid_model_animation` is different — it carries its skeleton
-inside the same file, so it is self-contained and names itself.
-
-### A library .variant_part_mesh opens as one prop
-
-Vertex format 2 packs many unrelated props into a single file —
-`equipment/mesh1` holds 52 of them across 142 parts — and every one
-sits at the origin, so showing them all is a heap rather than a model.
-These import with **only the first object visible**; the rest have their
-viewport eye closed. Nothing is deleted and export still writes every
-part.
-
-The usual "hide all but the finest LOD" pass is skipped for these, since
-it would only take away the other levels of the prop you are looking at.
-Files that are not libraries are unchanged: their parts *are* a LOD
-ladder, so the finest level stays shown and the rest are hidden.
-
-One catch: Blender will not select a hidden object, so **Selected
-Objects** on a freshly imported library exports just the visible prop.
-The default export source reads the collection instead and writes the
-lot; open the eyes first if you want to work from the selection.
-
-### A .variant_weighted_mesh ladder is several files
-
-CA ships a unit as `<unit>_lod1` to `<unit>_lod4` — one file per
-level, with the level in the **filename**, not in the file. Import them
-together (or one after another) and they land in a single model, one LOD
-collection each, with CA's `_lod1` becoming Blender's LOD 0. That merge
-happens when a model root of that name already exists in the scene;
-nothing goes looking on disk for the other files.
-
-Export mirrors it. **Write All LODs** is on by default and writes one
-file per LOD collection, named the way CA does — pick
-`myunit.variant_weighted_mesh` and you get `myunit_lod1` and
-`myunit_lod4` for a model with those two levels. Any `_lodN` you type
-yourself is stripped first, so picking `myunit_lod1` writes the same set.
-
-Turn it off to write a single level, chosen with **LOD Level**. You get a
-warning naming the levels that were left behind, because one file is one
-LOD and it is otherwise easy to think a whole model was exported.
-
-### Textures the file doesn't name
-
-`.variant_weighted_mesh` names no textures at all — the part name selects the texture set, and the importer looks for them under `unitmodels/textures/`. If none are found you get a warning rather than dead image nodes. Point it at your extracted textures with **Texture Root Override** in the import dialog (it appears under Build Materials), or set it once in **Edit → Preferences → Add-ons → Total War Model … → Texture Root Directory**. The dialog field is only an override for that one import — leave it empty and the dialog tells you which preference it is falling back to.
-
-`.variant_part_mesh` has no textures in the file either, and no slots to put any in — its material is three names. That is the format, not a failed import.
+The dropdown is narrowed to what the model's **container** can store — an RMV2 mesh sees the RMV2 layouts, a `.variant_part_mesh` mesh sees only its own three. It is *not* narrowed by version, so an RMV2 model lists the Shogun 2 layouts whatever version it is. That is not an oversight: `army_banner_flag_general` is a v7 file storing the Shogun 2 layout, and `zen_garden_floor_stone_01` is a v1 file storing the modern Static one, so neither set belongs to one era. Working out the real per-version table needs a corpus census of several games — see TODO 11.
 
 Changing the Version to a different *container* converts the meshes: a format the new container has no number for — a `.variant_part_mesh` layout in a model now being written as `.rigid_model_v2` — becomes **Auto**, which is the exporter working it out from the mesh. Moving between versions of the *same* container never touches it, so going v7 → v8 leaves a deliberate Sway or Weighted exactly as you set it.
 
 A mesh not yet inside a model root is offered everything, which is the state importers build meshes in. A mesh dragged from one model into another keeps the format it came with and has it pinned onto the new list, since nothing fires on a move to convert it.
+
+The **Auto-LOD Override** rows have a Vertex Format column too, and it follows the same list.
 
 ### Shader parameters
 
@@ -164,9 +104,42 @@ The block has two lists and the file keeps them apart, so the **Type** column is
 
 The parameter names are whatever the game's shader reads; the file carries no list of the valid ones, so **Add** starts a row at `light_scale` and the name is yours to set.
 
-Every format goes through the same root-collection-of-LOD-collections shape even when its file has no LOD ladder — `.animatable_rigid_model`, `.variant_weighted_mesh` and `.rigid_model_animation` all get a dummy LOD 0 — so the panels, the `.anim` importer and the exporters work the same way whatever the model came from.
+## Format quirks worth knowing
 
-Going backwards can cost you something the older format has no room for — an Empire-era rigid-model object holds one texture name where a modern one holds four. The exporter writes what fits and tells you what it left out, rather than refusing.
+Four things that look like a broken import and are not.
+
+### Neither ARM format names its skeleton
+
+`.animatable_rigid_model` and `.rigid_model` have no skeleton field anywhere, so the importer will not invent one:
+
+- A plain `.rigid_model` carries no bone index on any object — that is the whole of what "not animatable" means — so its **Skeleton** is left empty. It is scenery; it rides nothing.
+- An `.animatable_rigid_model` does ride a skeleton, but the file does not say which. CA's convention is an `.anim` of the same name sitting beside it, so that name is used **only when that file actually exists**. Otherwise you get an empty Skeleton and a warning, and can fill it in yourself on the model collection.
+
+Filling it in regardless is what used to put `mountainb.anim` on a Napoleon campaign mountain that has no bones at all.
+
+`.rigid_model_animation` is different — it carries its skeleton inside the same file, so it is self-contained and names itself.
+
+### A library .variant_part_mesh opens as one prop
+
+Vertex format 2 packs many unrelated props into a single file — `equipment/mesh1` holds 52 of them across 142 parts — and every one sits at the origin, so showing them all is a heap rather than a model. These import with **only the first object visible**; the rest have their viewport eye closed. Nothing is deleted and export still writes every part.
+
+The usual "hide all but the finest LOD" pass is skipped for these, since it would only take away the other levels of the prop you are looking at. Files that are not libraries are unchanged: their parts *are* a LOD ladder, so the finest level stays shown and the rest are hidden.
+
+One catch: Blender will not select a hidden object, so **Selected Objects** on a freshly imported library exports just the visible prop. The default export source reads the collection instead and writes the lot; open the eyes first if you want to work from the selection.
+
+### A .variant_weighted_mesh ladder is several files
+
+CA ships a unit as `<unit>_lod1` to `<unit>_lod4` — one file per level, with the level in the **filename**, not in the file. Import them together (or one after another) and they land in a single model, one LOD collection each, with CA's `_lod1` becoming Blender's LOD 0. That merge happens when a model root of that name already exists in the scene; nothing goes looking on disk for the other files.
+
+Export mirrors it. **Write All LODs** is on by default and writes one file per LOD collection, named the way CA does — pick `myunit.variant_weighted_mesh` and you get `myunit_lod1` and `myunit_lod4` for a model with those two levels. Any `_lodN` you type yourself is stripped first, so picking `myunit_lod1` writes the same set.
+
+Turn it off to write a single level, chosen with **LOD Level**. You get a warning naming the levels that were left behind, because one file is one LOD and it is otherwise easy to think a whole model was exported.
+
+### Textures the file doesn't name
+
+`.variant_weighted_mesh` names no textures at all — the part name selects the texture set, and the importer looks for them under `unitmodels/textures/`. If none are found you get a warning rather than dead image nodes. Point it at your extracted textures with **Texture Root Override** in the import dialog (it appears under Build Materials), or set it once in **Edit → Preferences → Add-ons → Total War Model … → Texture Root Directory**. The dialog field is only an override for that one import — leave it empty and the dialog tells you which preference it is falling back to.
+
+`.variant_part_mesh` has no textures in the file either, and no slots to put any in — its material is three names. That is the format, not a failed import.
 
 ## Collections are "the model"
 
@@ -181,6 +154,7 @@ model_name                 <- root collection: version, skeleton name, attachmen
 │   ├── body_lod0
 │   └── head_lod0
 ├── model_name_lod1        <- hidden on import (eye icon, not excluded)
+├── model_name_attach      <- attachment-point empties, if you asked for them
 └── ...
 ```
 
@@ -189,6 +163,8 @@ model_name                 <- root collection: version, skeleton name, attachmen
 All the formats build this same layout, so the panels and the `.anim` importer work the same whichever one a model came from.
 
 **There is one checkbox, Model Root.** A collection is a LOD because it sits inside a root, not because anything is ticked on it — so drop a collection into a model and it starts showing LOD settings, and drag it out and it stops. There is no way to make something a root *and* a LOD, because there is nothing to set. Ticking Model Root on a collection that is inside another model makes it its own model, and its parent stops counting it as a level.
+
+A child collection holding no meshes anywhere in it is not a level — that is how the attachment-point empties above stay out of the ladder, and it means a collection of references or rigs can live inside the model without being exported as a LOD.
 
 **LOD Level** is normally filled in for you. While it is still 0, a number in the collection's name is used instead — so a ladder built by hand as `model/model_lod0..3` works without opening the panel at all.
 
@@ -300,7 +276,7 @@ The four formats only the older games use sit one level down, under **Total War,
 | Import All LODs | RMV2 | Off (default): finest LOD only. On: every LOD in its own collection |
 | LODs | Unit Part | *All*, or *Most detailed only* |
 | Build Materials | RMV2, Shogun 2 RigidModel, Unit Mesh, Animated RigidModel | Build Principled BSDF node trees from the file's textures |
-| Texture Root | as above | Override the preferences folder for this import |
+| Texture Root Override | as above | Use a different folder for this one import. Empty (the default) uses the add-on preference, and the dialog says which |
 | Attachment Point Empties | RMV2 | Create empties for the file's attachment points |
 | Attach To Selected Armature | RMV2, Shogun 2 RigidModel, Unit Part | Bind to a selected armature and use its bone names |
 | One Variant Per Slot | Unit Mesh | On (default): show the first of each set of alternatives (`head01`..`head04`) and close the eye on the rest. Nothing is deleted |
@@ -322,7 +298,8 @@ Multi-file selection works for RMV2, Shogun 2 RigidModel, Unit Part, Unit Mesh a
 | Attachment Points | RMV2 | Write them, from the collection's list or the armature's bones |
 | Mode | .anim | *Animation* samples the scene frame range; *Bind Pose (Skeleton)* writes the rest pose |
 | Frame Rate | .anim | 0 = use the armature's stored rate, else the scene's |
-| LOD Level | Unit Mesh | Which level to write — one file is one LOD in that format, so a full ladder is four exports |
+| Write All LODs | Unit Mesh | On (default): write every LOD collection as its own file, named `<unit>_lod1`..`_lod4` the way CA does |
+| LOD Level | Unit Mesh | Which single level to write when Write All LODs is off. Blender's LOD 0 is CA's `_lod1` |
 | Frame Start / End | Animated RigidModel | Range sampled for the embedded animation |
 
 ## Things that will trip you up
@@ -335,7 +312,7 @@ Multi-file selection works for RMV2, Shogun 2 RigidModel, Unit Part, Unit Mesh a
 
 **Skinned export needs resolvable bone indices.** Keep the vertex group names the importer made (`bone_12`-style, or real bone names after a `.anim` import), or use an armature whose bone order matches the game skeleton. Bone *order* is what the game cares about — armatures this add-on creates stamp each bone with an `rmv2_bone_index` custom property, so renaming and reordering bones in Blender is safe.
 
-**Textures don't show up.** Set the **Texture Root Directory** in the add-on preferences to your extracted-texture folder. The file stores paths, not images.
+**Textures don't show up.** Set **Texture Root Directory** in the add-on preferences to your extracted-texture folder, or **Texture Root Override** in the import dialog for a one-off. Leave the override empty and the dialog tells you which preference it is falling back to, or that there is none. `.variant_weighted_mesh` and `.variant_part_mesh` name no textures at all — see *Format quirks worth knowing*.
 
 **Scale must match.** If you import a model at a non-default scale, import its `.anim` at the same one.
 
@@ -349,4 +326,4 @@ Multi-file selection works for RMV2, Shogun 2 RigidModel, Unit Part, Unit Mesh a
 
 **Empire unit meshes need `tpose.anim` first.** `.variant_weighted_mesh` does not even name its skeleton — it does not have to, since every unit in Empire and Napoleon uses the same 41-bone rig at `animations/reference/tpose.anim`. Import that, leave it selected, then import the mesh.
 
-**One `.variant_weighted_mesh` is one LOD.** The ladder is four separate files, so a full export is four exports with *LOD Level* set to 0, 1, 2, 3 — writing files named `<unit>_lod1` … `<unit>_lod4`, the way CA numbers them. On import the suffix is read back and the four files share a single root collection.
+**One `.variant_weighted_mesh` is one LOD.** The ladder is four separate files. **Write All LODs** is on by default and writes all of them in one go, under CA's `_lod1`..`_lod4` names; turn it off and you get the one level named by *LOD Level*, plus a warning listing what was left behind.

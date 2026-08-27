@@ -124,7 +124,7 @@ blocks, which nothing in Blender could rebuild, are preserved verbatim.
 | `.anim` v6 | **Never observed.** It occurs in no vanilla file of Empire, Napoleon, Shogun 2, Rome 2, Attila, either Warhammer, Warhammer 3 or Pharaoh. Read and write support exists on version numbering alone and has never met real data |
 | Encrypted DLC | Empire's 224 Elite Units `.variant_weighted_mesh` files and Pharaoh's 59 `data_special.pack` meshes ship under a cipher, and are deliberately left alone. Napoleon's equivalents are in the clear and work normally |
 | A tail of material headers | Ids 26, 40, 45, 54/57 and 84 — point lights, Attila's night lights, statues, settlement pieces. Each is plainly "a name, then a run of words", but every vanilla example has those words at zero, so a layout guess has nothing to be wrong against |
-| `.variant_part_mesh` v0 and v2 on export | They read fine but re-export as v3, and the material parameter block, the `crests` attachment and non-default material names are not carried through. Geometry, names, slots and skinning are |
+| `.variant_part_mesh`'s attachment slot | The name, matrix and bone a whole file hangs off is read but not carried through a Blender round trip. Geometry, names, versions, skinning, material names and the shader parameter block all are |
 | Medieval 2 and earlier | Different formats entirely — a separate job, and not started |
 
 ## Credits

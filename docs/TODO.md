@@ -7,34 +7,36 @@ priority order within each group.
 
 ## Needs a human
 
-### 1. Manual pass in Blender, and the UI that came with it
+### 1. Manual pass in Blender - done
 
-Nothing here has been driven by hand since the version work landed — it
-is all verified through headless round-trips, which check bytes, not
-whether the panels make sense.
+Driven by hand at last, and it found what headless round-trips cannot:
+byte-identity checks bytes, not whether a panel makes sense or whether
+an importer left a usable scene behind.
 
-New UI to look at:
+What came out of it, all fixed:
 
-- **Five version pickers**, one per exporter: RMV2 (v1, v2, v3, v5–v8),
-  `.anim` (v0, v1, v4–v8), `.animatable_rigid_model` (v0–v5),
-  `.variant_part_mesh` (v0/v2/v3), `.variant_weighted_mesh`
-  (v1/headerless).
-- **"Other Formats" box** on the RMV2 collection panel, showing
-  `arm_version`, `vmpf_version` and `vwm_version` together.
-- **Header Type** row on the armature panel (the `.anim` header word).
-- **Seven more entries in the Vertex Format picker** (Position, Grass,
-  Vegetation, Tree Billboard and friends), and the point attributes the
-  vegetation ones bring with them - `rmv2_pivot`, `rmv2_wind_0`,
-  `rmv2_wind_1`. Worth opening a real tree in the spreadsheet to see
-  whether that presentation is any use to a modder, or whether those
-  eight numbers want naming.
+- The five version pickers and the "Other Formats" box are **one
+  dropdown** on the model collection, grouped by format, and no export
+  dialog has a version field at all - a model is one file and a file has
+  one version.
+- The panels now show **only what the model's own container can hold**
+  (`capabilities.py`), which was the predicted outcome. A
+  `.variant_part_mesh` is not offered an alpha mode, and its Vertex
+  Format list is its own three rather than all eighteen.
+- **Named shader parameters and material names were being dropped** on
+  import and overwritten with defaults on export - invisible to every
+  sweep, because a sweep never goes through Blender.
+- A `.variant_weighted_mesh` of nothing but props **crashed** on import,
+  and a merged ladder silently exported one file of four.
+- A library `.variant_part_mesh` opened as 52 props stacked on the
+  origin; it now opens as one.
+- Both ARM formats were being told they rode a skeleton the file never
+  names - "mountainb.anim" on a Napoleon mountain with no bones.
 
-Expected outcome, as you predicted: most of this should be hidden unless
-it applies. A collection imported from a `.variant_part_mesh` has no use
-for `vwm_version`. The obvious rule is to show only the version for the
-format the model came from, with the rest behind a toggle — but which
-formats a given model can *sensibly* be written as is a judgement call,
-so worth deciding at the panel rather than guessing here.
+Still not done, and still wanting a human: the vegetation point
+attributes (`rmv2_pivot`, `rmv2_wind_0`, `rmv2_wind_1`). Whether eight
+raw numbers in the spreadsheet are any use to a modder, or want naming,
+is a judgement nobody has made yet.
 
 ### 2. Test something in-game
 
@@ -481,7 +483,7 @@ numbers - a stiffness, a phase, an amplitude.
   is right for Shogun 2 and merely consistent for v3; no v3 file has
   been round-tripped through Blender and loaded by Rome 2.
 
-### 8. RMV2's own parameter lists have no UI
+### 10. RMV2's own parameter lists have no UI
 
 The named parameter blocks of `.animatable_rigid_model`,
 `.variant_part_mesh` and `.variant_weighted_mesh` are now an editable
@@ -502,7 +504,7 @@ they could be a **UV Scale** field on the mesh panel without touching
 the unknown ones. The rest wants a corpus sweep of which indices
 actually occur, per game, before any of them gets a label.
 
-### 9. Which vertex formats go with which version
+### 11. Which vertex formats go with which version
 
 The Vertex Format dropdown is narrowed by **container** — an RMV2 mesh
 sees the RMV2 layouts, a `.variant_part_mesh` mesh sees only its own
