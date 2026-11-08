@@ -969,6 +969,9 @@ def _short_material_from_settings(kind: str, settings, fmt: int,
             material_id=material_id, vertex_format=fmt,
             model_name=(settings.model_name or obj_name),
             values=words or (0,) * 8)
+    if kind == "point_light" and material_id == rf.MAT_STATIC_POINT_LIGHT:
+        return rf.PointLightMaterial(
+            vertex_format=fmt, model_name=(settings.model_name or obj_name))
     if kind == "terrain_tile" and material_id in rf._TERRAIN_TILE_IDS:
         words = tuple(int(v) for v in extra.get("terrain_words", ()))
         return rf.TerrainTileMaterial(
@@ -997,6 +1000,11 @@ def _material_from_settings(obj, settings, fmt: int, scale: float,
         short = _short_material_from_settings(
             kind, settings, fmt, _resolve_material_id(settings, fmt), extra,
             utils.strip_blender_suffix(obj.name))
+        if isinstance(short, rf.PointLightMaterial):
+            short.second_name = str(extra.get("second_name", ""))
+            short.pivot = tuple(
+                v * scale + 0.0 for v in utils.blender_to_game_v(
+                    obj.matrix_world.translation))
         if short is not None:
             return short
 
@@ -1071,6 +1079,12 @@ def build_model(context, obj, options, attach_points, attach_names,
             and int(options.get("version", "7")) not in rf.SHOGUN2_VERSIONS):
         return _build_rope_model(context, obj, settings, options,
                                  attach_points, warnings)
+
+    if obj.type == "MESH" and not len(obj.data.vertices):
+        model = _build_index_only_model(obj, settings, options,
+                                        attach_points)
+        if model is not None:
+            return model
 
     arrays = extract_mesh_arrays(context, obj, options, warnings,
                                  decimate_ratio)
@@ -1197,6 +1211,39 @@ def build_model(context, obj, options, attach_points, attach_names,
         return _assemble_model(settings, material, mesh)
     finally:
         arrays["source_object"].to_mesh_clear()
+
+
+def _build_index_only_model(obj, settings, options, attach_points
+                            ) -> rf.RmvModel | None:
+    """A point light or decal: indices into vertices the game builds
+    itself, kept from the import because Blender has nothing to show for
+    them.  The box moves with the object, since it is the box around
+    where the light or decal sits."""
+    extra = _extra_data(settings)
+    try:
+        indices = np.frombuffer(bytes.fromhex(extra["index_only"]),
+                                dtype="<u2").copy()
+        (lo, hi) = (np.asarray(v, np.float64)
+                    for v in extra["index_only_bbox"])
+        old_pivot = np.asarray(extra.get("index_only_pivot", (0, 0, 0)),
+                               np.float64)
+    except (KeyError, ValueError, TypeError):
+        return None
+    scale = options.get("global_scale", 1.0)
+    fmt = int(extra.get("index_only_vertex_format", -1))
+    material = _material_from_settings(obj, settings, fmt, scale,
+                                       attach_points, options)
+    mesh = rf.RmvMeshData.empty(0, 0)
+    mesh.indices = indices
+    model = _assemble_model(settings, material, mesh)
+    model.declared_vertex_count = int(extra.get("declared_vertex_count", 0))
+    shift = (np.asarray(getattr(material, "pivot", (0.0, 0.0, 0.0)),
+                        np.float64) - old_pivot)
+    if np.any(shift):
+        lo, hi = lo + shift, hi + shift
+    model.bbox_min = tuple(lo.tolist())
+    model.bbox_max = tuple(hi.tolist())
+    return model
 
 
 def _rebuild_physics_block(obj, material, positions, scale: float,

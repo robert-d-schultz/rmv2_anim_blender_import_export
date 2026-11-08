@@ -421,11 +421,16 @@ against.
 
 | id | size (v6 / v5) | files | what |
 | --- | --- | --- | --- |
-| 45 | 524 / 1036 | ~15 | point lights - two paths and three words, going by how the two versions differ |
-| 84 | 1128 | ~7 | Attila's ship night lights |
 | 54, 57 | - / 1104, 1168 | 4 | Rome 2 and Attila's greek statues |
 | 26 | 80 | 123 models | non_renderable |
 | 40 | 544 | 96 models | unidentified, campaign settlements |
+
+Id 45, the static point light, came off it with a ship's night lights
+whose three words were not zero: they are the light's position, each
+exactly the centre of its mesh's bounding box, after a 256-byte preset
+name and a second 256-byte field that is empty in every one seen. See
+`PointLightMaterial`. The same file put id 84 at 1128 bytes through the
+ordinary weighted layout, so that row went too.
 
 Ids 29 and 30 came off this table with Warhammer, which has 19 of them:
 the layout was always "a 256-byte name and eight words", and the words
@@ -608,3 +613,25 @@ own schedule, so keying them 1-to-2 is a preview convenience, not
 something the file asks for. An import option, defaulting off, is
 probably the honest shape of it. The same trick would suit vegetation's
 rest position (`rmv2_pivot`) if it ever proves useful there.
+
+### 13. Meshes split from one source object - noted, deliberately skipped
+
+Some LODs hold several meshes that are plainly one object split by
+material: they share the model name, the pivot (bit for bit) and one
+identical bounding box, and that box is the bounds of the whole group,
+not of any one piece. Seven such groups across the samples, in Attila
+(night lights: a 68 lantern and the 84 lamp inside it), Shogun 2, Three
+Kingdoms and Warhammer (a 68 + 97 oak), usually with different
+materials in the one group. Every group where the vertices can be
+compared fits the union box to rounding; the Shogun 2 one is bone-local
+and could not be checked. Sphere colliders that share a name are not
+this - their boxes differ.
+
+Import drops the relationship (`Box155_LOD1`, `Box155_LOD1.001`, nothing
+tying them together), so export gives each piece a box of its own
+vertices; the night lights' lamp box shrinks by up to 0.14. That is
+judged harmless and left alone. If it ever matters, the cheap way to
+represent it is to parent each group to an empty named after the source
+object at the shared pivot, and have export write one name, pivot and
+union box per empty. The Blender-native way - one object, one material
+slot per piece - means moving every per-object setting onto the slots.

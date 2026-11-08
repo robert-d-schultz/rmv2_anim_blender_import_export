@@ -4035,6 +4035,67 @@ def rma_plain_file_case(tmpdir):
           "the user is told the animation is missing")
 
 
+def point_light_case(tmpdir):
+    """A static point light ships indices into vertices the game builds
+    itself, and no vertex block.  The importer used to try to build faces
+    from those indices and fail the whole file."""
+    print("\n=== point light ===")
+    reset_scene()
+    sample = os.path.join(SAMPLES, "attila", "night_lights_dm1.rigid_model_v2")
+    if not os.path.isfile(sample):
+        print("  (skipped - sample not present)")
+        return
+    source = rf.load(open(sample, "rb").read())
+    root, _ = import_rmv2.import_file(bpy.context, sample, {
+        "import_lods": "ALL", "build_materials": True, "texture_root": "",
+        "create_attach_empties": False, "global_scale": 1.0,
+    })
+    objs = list(root.children[0].objects)
+    check(len(objs) == 8, f"every mesh imported ({len(objs)})")
+    lights = [o for o in objs if o.rmv2.model_name == "orange_10m_glow"]
+    check(len(lights) == 2 and all(not len(o.data.vertices) for o in lights),
+          "both lights imported as empty meshes")
+    want = utils.game_to_blender_v(source.lods[0].models[0].material.pivot)
+    check(any(np.allclose(tuple(o.location), want) for o in lights),
+          "a light's object sits at the light's position")
+
+    activate_collection(root.name)
+    dst = os.path.join(tmpdir, "night_lights.rigid_model_v2")
+    options = {"source": "AUTO", "version": "6", "skeleton_name": "",
+               "apply_modifiers": True, "high_precision": False,
+               "write_attach_points": True, "global_scale": 1.0}
+    export_rmv2.export_file(bpy.context, dst, options)
+    result = rf.load(open(dst, "rb").read())
+    pairs = [(a, b) for a, b in zip(source.lods[0].models,
+                                    result.lods[0].models)
+             if a.material.material_id == 45]
+    check(len(pairs) == 2 and all(
+        a.material.write(6) == b.material.write(6)
+        and a.mesh.indices.tolist() == b.mesh.indices.tolist()
+        and a.declared_vertex_count == b.declared_vertex_count
+        and (a.bbox_min, a.bbox_max) == (b.bbox_min, b.bbox_max)
+        for a, b in pairs), "untouched lights go back byte for byte")
+
+    # Moving the object moves the light, and its box with it.
+    light = lights[0]
+    before = rf.load(open(dst, "rb").read())
+    light.location.z += 1.0
+    bpy.context.view_layer.update()
+    export_rmv2.export_file(bpy.context, dst, options)
+    after = rf.load(open(dst, "rb").read())
+    moved = [(a, b) for a, b in zip(before.lods[0].models,
+                                    after.lods[0].models)
+             if a.material.pivot != b.material.pivot]
+    check(len(moved) == 1, f"one light moved ({len(moved)})")
+    if moved:
+        a, b = moved[0]
+        shift = np.subtract(b.material.pivot, a.material.pivot)
+        check(np.allclose(shift, (0.0, 1.0, 0.0), atol=1e-5)
+              and np.allclose(np.subtract(b.bbox_min, a.bbox_min), shift,
+                              atol=1e-5),
+              f"light and box moved up together ({shift})")
+
+
 def rope_case(tmpdir):
     """A rope's geometry is the node chain in its material block.
 
@@ -4600,6 +4661,7 @@ def main():
         rma_case(tmpdir)
         rma_plain_file_case(tmpdir)
         rope_case(tmpdir)
+        point_light_case(tmpdir)
         vertex_order_and_frame_case(tmpdir)
         cloth_case(tmpdir)
         rigging_case(tmpdir)

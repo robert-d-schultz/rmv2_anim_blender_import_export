@@ -758,6 +758,57 @@ class TestSwayVertex(unittest.TestCase):
         self.assertEqual(rf.encode_vertices(mesh, rf.VF_SWAY, 7), blob)
 
 
+class TestPointLightMaterial(unittest.TestCase):
+    """static_point_light, id 45: two 256-byte names and the light's
+    position, on a mesh that ships indices and no vertices."""
+
+    def build(self):
+        return rf.PointLightMaterial(model_name="orange_10m_glow",
+                                     pivot=(0.25, 6.0, -3.5))
+
+    def test_size(self):
+        self.assertEqual(self.build().compute_size(6), 524)
+        self.assertEqual(self.build().compute_size(5), 1036)
+
+    def test_roundtrip(self):
+        for version in (5, 6):
+            with self.subTest(version=version):
+                blob = self.build().write(version)
+                self.assertEqual(len(blob), 524 if version == 6 else 1036)
+                mat = rf._parse_material(blob, 0, 45, len(blob), version)
+                self.assertIsInstance(mat, rf.PointLightMaterial)
+                self.assertEqual(mat.model_name, "orange_10m_glow")
+                self.assertEqual(mat.pivot, (0.25, 6.0, -3.5))
+                self.assertEqual(mat.write(version), blob)
+
+    def test_second_name_and_junk_survive(self):
+        raw = bytearray(self.build().write(6))
+        raw[16:21] = b"stale"
+        raw[256:262] = b"second"
+        mat = rf.PointLightMaterial.parse(bytes(raw), 0, 6)
+        self.assertEqual(mat.second_name, "second")
+        self.assertEqual(mat.write(6), bytes(raw))
+
+    def test_index_only_mesh_roundtrips(self):
+        """The game builds the vertices; the file has only their count."""
+        rmv = rf.RmvFile(version=6)
+        model = rf.RmvModel(material=self.build(),
+                            mesh=rf.RmvMeshData.empty(0, 0),
+                            bbox_min=(-0.25, 5.5, -4.0),
+                            bbox_max=(0.75, 6.5, -3.0),
+                            declared_vertex_count=4)
+        model.mesh.indices = np.array([0, 1, 2, 2, 1, 3], np.uint16)
+        rmv.lods.append(rf.RmvLod(models=[model]))
+        blob = rf.save(rmv)
+        again = rf.load(blob).lods[0].models[0]
+        self.assertIsInstance(again.material, rf.PointLightMaterial)
+        self.assertEqual(again.mesh.vertex_count, 0)
+        self.assertEqual(again.declared_vertex_count, 4)
+        self.assertEqual(again.mesh.indices.tolist(), [0, 1, 2, 2, 1, 3])
+        self.assertEqual(again.material.pivot, (0.25, 6.0, -3.5))
+        self.assertEqual(rf.save(rf.load(blob)), blob)
+
+
 class TestNamedMaterial(unittest.TestCase):
     """The 3D interface banners, material ids 29 and 30: a 256-byte model
     name and eight words that are zero in every vanilla file."""

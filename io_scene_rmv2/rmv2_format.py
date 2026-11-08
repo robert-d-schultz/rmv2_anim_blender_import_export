@@ -198,6 +198,7 @@ MAT_WEIGHTED_CLOTH = 58
 MAT_CLOTH = 60
 MAT_COLLISION_SHAPE = 62
 MAT_ROPE = 93
+MAT_STATIC_POINT_LIGHT = 45
 
 # TextureType
 TEXTURE_TYPE_NAMES = {
@@ -1410,6 +1411,87 @@ class NamedMaterial:
 
 
 @dataclass
+class PointLightMaterial:
+    """static_point_light (id 45): two names and the light's position.
+
+    524 bytes in v6: a 256-byte name - the light preset, such as
+    "orange_10m_glow" - a second 256-byte field, then three floats.  The
+    floats are the light's position in model space: in Attila's ship
+    night lights each is exactly the centre of its mesh's bounding box,
+    a box about a metre across.  They are read as the pivot, so the
+    light's object sits where the light is, and moving the object moves
+    the light.  The second field is empty in every example seen; it is
+    kept as it was read.
+
+    The mesh ships no vertices, only indices into a sphere of declared
+    vertices the game builds itself - the same arrangement as Warhammer
+    3's decals (see RmvModel.declared_vertex_count).
+
+    The v5 size, 1036, is the same layout with both names doubled for
+    UTF-16, which is how the other fixed-width names behave.
+    """
+    material_id: int = 45
+    vertex_format: int = -1
+    model_name: str = ""
+    name_raw: bytes = b""
+    second_name: str = ""
+    second_raw: bytes = b""
+    pivot: tuple = (0.0, 0.0, 0.0)
+
+    # Interface parity with WeightedMaterial ------------------------------
+    textures: list = field(default_factory=list)
+    attachment_points: list = field(default_factory=list)
+    string_params: list = field(default_factory=list)
+    float_params: list = field(default_factory=list)
+    int_params: list = field(default_factory=list)
+    vec4_params: list = field(default_factory=list)
+    texture_directory: str = ""
+    filters: str = ""
+    matrix_index: int = -1
+    parent_matrix_index: int = -1
+
+    @staticmethod
+    def size_for(version: int) -> int:
+        return 2 * _named_name_width(version) + 12
+
+    def compute_size(self, version: int = 6) -> int:
+        return self.size_for(version)
+
+    def get_texture(self, texture_type: int):
+        return None
+
+    def get_int_param(self, index: int):
+        return None
+
+    @staticmethod
+    def parse(buf: bytes, offset: int, version: int = 6
+              ) -> "PointLightMaterial":
+        width = _named_name_width(version)
+        wide = _wide_strings(version)
+        raw = bytes(buf[offset:offset + width])
+        second = bytes(buf[offset + width:offset + 2 * width])
+        return PointLightMaterial(
+            model_name=_decode_name(raw, wide), name_raw=raw,
+            second_name=_decode_name(second, wide), second_raw=second,
+            pivot=struct.unpack_from("<3f", buf, offset + 2 * width))
+
+    def write(self, version: int = 6) -> bytes:
+        width = _named_name_width(version)
+        wide = _wide_strings(version)
+
+        def field_bytes(raw: bytes, value: str) -> bytes:
+            # The raw field keeps whatever CA left after the terminator;
+            # it is only re-encoded once the name itself has changed.
+            if len(raw) == width and _decode_name(raw, wide) == value:
+                return raw
+            return _encode_name(value, _named_name_width(6), wide)
+
+        return (field_bytes(self.name_raw, self.model_name)
+                + field_bytes(self.second_raw, self.second_name)
+                + struct.pack("<3f", *self.pivot))
+
+
+@dataclass
 class EmptyMaterial:
     """Some materials have no header at all - the mesh section goes
     straight from the common header to the vertices.
@@ -1890,6 +1972,9 @@ def _parse_material(buf: bytes, offset: int, material_id: int,
             and expected_size - _named_name_width(version) <= 64):
         mat = NamedMaterial.parse(buf, offset, material_id, expected_size,
                                   version)
+    elif (material_id == MAT_STATIC_POINT_LIGHT
+            and expected_size == PointLightMaterial.size_for(version)):
+        mat = PointLightMaterial.parse(buf, offset, version)
     elif (material_id in _DECAL_IDS
             and expected_size >= _decal_path_width(version)
             and (expected_size - _decal_path_width(version)) % 4 == 0

@@ -397,9 +397,15 @@ inverse mass and u as point attributes — and export writes the chain
 back, so an untouched rope goes out byte for byte and an edited one
 gets fresh rest lengths and a box of the nodes padded by the radius.
 
-Five families are **not decoded**: ids 26, 40, 45, 54, 57 and 84 —
-`non_renderable`, campaign settlement pieces, point lights, statues and
-Attila's ship night lights. Each is plainly a name or path followed by a
+A static point light (45) is a 256-byte preset name, a second 256-byte
+field (empty in every one seen) and three floats: the light's position,
+the centre of its mesh's box, read as the pivot. Its mesh ships indices
+into a declared vertex count and no vertex block — the game builds the
+sphere — so in Blender it is an empty mesh at the light, with the index
+block kept for export. Sizes are 524 in v6 and 1036 in v5.
+
+Four families are **not decoded**: ids 26, 40, 54 and 57 —
+`non_renderable`, campaign settlement pieces and statues. Each is plainly a name or path followed by a
 run of words, but every observed example has those words at zero, so
 there is nothing to check a layout against.
 

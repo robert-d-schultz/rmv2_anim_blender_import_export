@@ -109,6 +109,12 @@ def _build_extra_json(material, model) -> str:
         # A name and a run of words, and the name is already the object's.
         extra["material_kind"] = "named"
         extra["named_words"] = [int(v) for v in material.values]
+    elif isinstance(material, rf.PointLightMaterial):
+        # The name is the object's and the position is its location;
+        # only the second name, empty in every one seen, is left.
+        extra["material_kind"] = "point_light"
+        if material.second_name:
+            extra["second_name"] = material.second_name
     elif isinstance(material, rf.EmptyMaterial):
         # Nothing to keep but the fact that there was no header at all.
         extra["material_kind"] = "empty"
@@ -139,6 +145,18 @@ def _build_extra_json(material, model) -> str:
         extra["declared_section_size"] = int(model.declared_section_size or 0)
     if model.declared_vertex_count is not None:
         extra["declared_vertex_count"] = int(model.declared_vertex_count)
+    if (not model.mesh.vertex_count and len(model.mesh.indices)
+            and _rope_graph(model) is None):
+        # Point lights and decals ship indices into vertices the game
+        # builds itself, so there is nothing for Blender to draw.  The
+        # index block and the box ride along instead, the box with the
+        # pivot it was read with so export can move it with the object.
+        extra["index_only"] = _bytes_to_hex(
+            model.mesh.indices.astype("<u2").tobytes())
+        extra["index_only_bbox"] = [list(map(float, model.bbox_min)),
+                                    list(map(float, model.bbox_max))]
+        extra["index_only_pivot"] = [float(v) for v in material.pivot]
+        extra["index_only_vertex_format"] = int(material.vertex_format)
     if any(model.shader_extra):
         extra["shader_extra"] = _bytes_to_hex(model.shader_extra)
     if any(model.shader_zero):
@@ -207,6 +225,10 @@ def _build_mesh_object(model, version: int, name: str, scale: float,
     rope = _rope_graph(model)
     if rope is not None:
         me = rmv2_rope.build_mesh(name, rope, scale)
+    elif not n:
+        # Indices with no vertices (see _build_extra_json): an empty
+        # mesh, placed at the pivot like any other.
+        me = bpy.data.meshes.new(name)
     else:
         pos_b = utils.game_to_blender(mesh_data.positions) * scale
         # The game->Blender map is a reflection (det -1), so winding must
